@@ -20,30 +20,14 @@ class MainActivity : Activity() {
     private val sources = LinkedHashSet<String>()
     private val nodes = LinkedHashSet<String>()
     private val scored = ArrayList<Pair<String, Long>>()
-    
+
     private lateinit var sourceInput: EditText
-    private lateinit var customDomainInput: EditText
     private lateinit var countInput: EditText
     private lateinit var timeoutInput: EditText
     private lateinit var status: TextView
     private lateinit var sourceContainer: LinearLayout
-    private lateinit var modeRadioGroup: RadioGroup
-    private lateinit var rbEdgeTunnel: RadioButton
-    private lateinit var rbGeneral: RadioButton
-    private lateinit var edgeConfigLayout: LinearLayout
 
-    private val cfFastIps = listOf(
-        "104.16.160.1",
-        "104.17.160.1",
-        "172.67.160.1",
-        "icook.tw",
-        "www.visa.com.tw",
-        "cf.090227.xyz",
-        "time.is",
-        "www.digitalocean.com"
-    )
-
-    private val defaultsGeneral = listOf(
+    private val defaultSources = listOf(
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs_base64.txt",
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
         "https://raw.githubusercontent.com/ninjastrikers/Nexus-nodes/main/configs/vless.txt",
@@ -53,23 +37,22 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        loadSources(isEdgeMode = true)
+        loadSources()
         buildUi()
     }
 
-    private fun loadSources(isEdgeMode: Boolean) {
-        val key = if (isEdgeMode) "sources_edge" else "sources_general"
-        val saved = prefs.getStringSet(key, null)
+    private fun loadSources() {
+        val saved = prefs.getStringSet("sources_pool", null)
         sources.clear()
-        if (!saved.isNullOrEmpty()) {
+        if (saved.isNullOrEmpty()) {
+            sources.addAll(defaultSources)
+        } else {
             sources.addAll(saved)
         }
     }
 
     private fun saveSources() {
-        val isEdgeMode = rbEdgeTunnel.isChecked
-        val key = if (isEdgeMode) "sources_edge" else "sources_general"
-        prefs.edit().putStringSet(key, sources).apply()
+        prefs.edit().putStringSet("sources_pool", sources).apply()
     }
 
     private fun buildUi() {
@@ -81,85 +64,19 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "征兵处"
-            textSize = 26f
+            text = "征兵处 (VPN 节点聚合器)"
+            textSize = 24f
             setPadding(0, 0, 0, 16)
         })
 
         root.addView(TextView(this).apply {
-            text = "选择工作模式："
-            textSize = 14f
-            setPadding(0, 0, 0, 6)
-        })
-
-        modeRadioGroup = RadioGroup(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, 12)
-        }
-
-        rbEdgeTunnel = RadioButton(this).apply {
-            text = "edgetunnel 裸连模式"
-            isChecked = true
-        }
-        rbGeneral = RadioButton(this).apply {
-            text = "全网聚合订阅模式"
-        }
-
-        modeRadioGroup.addView(rbEdgeTunnel)
-        modeRadioGroup.addView(rbGeneral)
-        root.addView(modeRadioGroup)
-
-        edgeConfigLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 12)
-        }
-        edgeConfigLayout.addView(TextView(this).apply {
-            text = "输入你自己的 edgetunnel 订阅链接："
+            text = "输入订阅源地址（TXT / Base64 / GitHub Raw）："
             textSize = 13f
-        })
-        customDomainInput = EditText(this).apply {
-            hint = "例如: https://xxx.pages.dev/sub?token=xxx"
-            setText(prefs.getString("custom_edge_url", ""))
-            minLines = 1
-        }
-        edgeConfigLayout.addView(customDomainInput)
-        
-        val saveDomainBtn = Button(this).apply {
-            text = "保存并绑定我的域名"
-            textSize = 12f
-        }
-        saveDomainBtn.setOnClickListener {
-            val domainUrl = customDomainInput.text.toString().trim()
-            prefs.edit().putString("custom_edge_url", domainUrl).apply()
-            if (domainUrl.isNotBlank()) {
-                sources.add(domainUrl)
-                saveSources()
-                refreshSourceList()
-                status.text = "已绑定并保存你的专属域名！"
-            } else {
-                status.text = "请输入有效的订阅链接"
-            }
-        }
-        edgeConfigLayout.addView(saveDomainBtn)
-        root.addView(edgeConfigLayout)
-
-        modeRadioGroup.setOnCheckedChangeListener { _, checkedId ->
-            val isEdge = checkedId == rbEdgeTunnel.id
-            edgeConfigLayout.visibility = if (isEdge) android.view.View.VISIBLE else android.view.View.GONE
-            loadSources(isEdge)
-            refreshSourceList()
-            nodes.clear()
-            scored.clear()
-            status.text = if (isEdge) "已切换至【edgetunnel 裸连模式】" else "已切换至【全网聚合订阅模式】"
-        }
-
-        root.addView(TextView(this).apply {
-            text = "输入附加订阅源地址（TXT / Base64 / 备用源）："
-            textSize = 13f
+            setPadding(0, 0, 0, 4)
         })
 
         sourceInput = EditText(this).apply {
-            hint = "https://……"
+            hint = "https://raw.githubusercontent.com/..."
             minLines = 2
         }
         root.addView(sourceInput)
@@ -173,7 +90,7 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         val clearSourcesBtn = Button(this).apply {
-            text = "清空当前模式源"
+            text = "清空所有源"
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         btnRow1.addView(addBtn)
@@ -186,10 +103,10 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        val updateBtn = Button(this).apply { text = "① 更新全部订阅" }
+        val updateBtn = Button(this).apply { text = "① 拉取并更新全部订阅" }
         root.addView(updateBtn)
 
-        val speedBtn = Button(this).apply { text = "② 智能深度测速与排序" }
+        val speedBtn = Button(this).apply { text = "② 智能深度测速与按延迟排序" }
         root.addView(speedBtn)
 
         timeoutInput = EditText(this).apply {
@@ -200,19 +117,19 @@ class MainActivity : Activity() {
         root.addView(timeoutInput)
 
         countInput = EditText(this).apply {
-            hint = "导出前 N 个可用节点"
+            hint = "导出前 N 个最优节点"
             setText("100")
             inputType = 2
         }
         root.addView(countInput)
 
-        val exportTxt = Button(this).apply { text = "③ 导出 TXT" }
+        val exportTxt = Button(this).apply { text = "③ 导出 TXT 节点包" }
         root.addView(exportTxt)
 
-        val exportClash = Button(this).apply { text = "④ 导出 CLASH YAML" }
+        val exportClash = Button(this).apply { text = "④ 导出 CLASH YAML 配置文件" }
         root.addView(exportClash)
 
-        val clearBtn = Button(this).apply { text = "清空当前已测节点" }
+        val clearBtn = Button(this).apply { text = "清空当前节点池" }
         root.addView(clearBtn)
 
         status = TextView(this).apply {
@@ -222,7 +139,7 @@ class MainActivity : Activity() {
         root.addView(status)
 
         setContentView(scroll)
-        status.text = "就绪：当前模式共有 ${sources.size} 个订阅源"
+        status.text = "就绪：当前共有 ${sources.size} 个内置订阅源"
 
         addBtn.setOnClickListener {
             val u = sourceInput.text.toString().trim()
@@ -231,21 +148,21 @@ class MainActivity : Activity() {
                 saveSources()
                 sourceInput.text.clear()
                 refreshSourceList()
-                status.text = "已添加，当前共 ${sources.size} 个源"
+                status.text = "已添加，当前共 ${sources.size} 个订阅源"
             } else {
-                status.text = "请输入 http:// 或 https:// 开头的链接"
+                status.text = "请输入 http:// 或 https:// 开头的有效链接"
             }
         }
 
         clearSourcesBtn.setOnClickListener {
             AlertDialog.Builder(this)
                 .setTitle("确认清空")
-                .setMessage("确定清空当前模式下的所有订阅源吗？")
+                .setMessage("确定清空所有订阅源吗？")
                 .setPositiveButton("清空") { _, _ ->
                     sources.clear()
                     saveSources()
                     refreshSourceList()
-                    status.text = "已清空订阅源"
+                    status.text = "已清空所有订阅源"
                 }
                 .setNegativeButton("取消", null)
                 .show()
@@ -257,7 +174,7 @@ class MainActivity : Activity() {
         exportClash.setOnClickListener { exportFile(true) }
         clearBtn.setOnClickListener {
             nodes.clear(); scored.clear()
-            status.text = "已清空当前节点"
+            status.text = "已清空当前节点池"
         }
     }
 
@@ -289,7 +206,7 @@ class MainActivity : Activity() {
                     sources.remove(s)
                     saveSources()
                     refreshSourceList()
-                    status.text = "已删除 1 个订阅源，剩余 ${sources.size} 个"
+                    status.text = "已删除 1 个源，剩余 ${sources.size} 个"
                 }
             }
             row.addView(labelView)
@@ -299,21 +216,12 @@ class MainActivity : Activity() {
     }
 
     private fun updateAll() {
-        if (rbEdgeTunnel.isChecked) {
-            val customUrl = customDomainInput.text.toString().trim()
-            if (customUrl.startsWith("http://") || customUrl.startsWith("https://")) {
-                sources.add(customUrl)
-                saveSources()
-            }
-        }
-
         if (sources.isEmpty()) {
-            status.text = "请先添加或绑定你的 edgetunnel 域名/订阅源"
+            status.text = "请先添加订阅源"
             return
         }
-        val isEdge = rbEdgeTunnel.isChecked
-        status.text = if (isEdge) "正在拉取你的 edgetunnel 订阅并应用优选……" else "正在并发下载全网订阅源……"
-        
+        status.text = "正在并发拉取全网免费节点……"
+
         executor.execute {
             val result = LinkedHashSet<String>()
             var ok = 0
@@ -321,56 +229,22 @@ class MainActivity : Activity() {
                 try {
                     val content = download(url)
                     val extracted = extractNodes(content)
-                    if (extracted.isNotEmpty()) ok++
-                    
-                    extracted.forEach { raw ->
-                        if (isEdge) {
-                            result.add(speedUpNode(raw))
-                        } else {
-                            result.add(raw)
-                        }
+                    if (extracted.isNotEmpty()) {
+                        ok++
+                        result.addAll(extracted)
                     }
                 } catch (_: Exception) {}
                 runOnUiThread {
-                    status.text = "正在更新：已处理 ${ok}/${sources.size} 个源，获取 ${result.size} 个节点"
+                    status.text = "拉取中：已处理 ${ok}/${sources.size} 个源，累计获取 ${result.size} 个节点"
                 }
             }
             nodes.clear()
             nodes.addAll(result)
             scored.clear()
             runOnUiThread {
-                status.text = "更新完成：共获取 ${nodes.size} 个节点"
+                status.text = "更新完成：共获取并去重 ${nodes.size} 个原始节点"
             }
         }
-    }
-
-    private fun speedUpNode(node: String): String {
-        try {
-            val u = node.trim()
-            if (u.startsWith("vless://", ignoreCase = true)) {
-                val uri = URI(u)
-                val queryMap = parseQuery(uri.rawQuery ?: "")
-                val oldHost = uri.host ?: ""
-                val fastIp = cfFastIps.random()
-                val hostParam = queryMap["host"]?.ifBlank { oldHost } ?: oldHost
-                val sniParam = queryMap["sni"]?.ifBlank { oldHost } ?: oldHost
-                val newQuery = (queryMap + mapOf("host" to hostParam, "sni" to sniParam, "type" to (queryMap["type"] ?: "ws")))
-                    .entries.joinToString("&") { "${it.key}=${URLEncoder.encode(it.value, "UTF-8")}" }
-                val remark = uri.rawFragment ?: "CF_Direct"
-                return "vless://${uri.userInfo}@$fastIp:${if (uri.port > 0) uri.port else 443}?$newQuery#$remark"
-            } else if (u.startsWith("vmess://", ignoreCase = true)) {
-                val json = String(Base64.decode(u.substring(8), Base64.DEFAULT or Base64.NO_WRAP), Charsets.UTF_8)
-                val obj = JSONObject(json)
-                val oldHost = obj.optString("add")
-                obj.put("host", obj.optString("host").ifBlank { oldHost })
-                obj.put("sni", obj.optString("sni").ifBlank { oldHost })
-                obj.put("add", cfFastIps.random())
-                obj.put("net", "ws")
-                val newB64 = Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                return "vmess://$newB64"
-            }
-        } catch (_: Exception) {}
-        return node
     }
 
     private fun download(url: String): String {
@@ -382,8 +256,9 @@ class MainActivity : Activity() {
         return conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
     }
 
+    // 严苛白名单正则，过滤掉一切非代理协议的网页垃圾链接
     private fun extractNodes(text: String): List<String> {
-        val regex = Regex("(?i)(?:vmess|vless|trojan|ssr|ss|hysteria2|hysteria|hy2|tuic|socks5?|http)://[^\\s\"'<>]+")
+        val regex = Regex("(?i)(?:vmess|vless|trojan|ss|ssr|hysteria2|hysteria|hy2|tuic)://[^\\s\"'<>]+")
         val candidates = LinkedHashSet<String>()
 
         fun scan(s: String) {
@@ -421,19 +296,18 @@ class MainActivity : Activity() {
 
     private fun speedTest() {
         if (nodes.isEmpty()) {
-            status.text = "请先点击“更新全部订阅”"
+            status.text = "请先点击“拉取并更新全部订阅”"
             return
         }
         val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2500
-        val isEdge = rbEdgeTunnel.isChecked
         val snapshot = nodes.toList()
-        status.text = if (isEdge) "正在执行国内裸连深度测速：0/${snapshot.size}" else "正在进行多线程快速测速：0/${snapshot.size}"
+        status.text = "正在进行多线程延迟测速与排序：0/${snapshot.size}"
 
         executor.execute {
             val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
             val done = AtomicInteger(0)
             val pool = Executors.newFixedThreadPool(24)
-            
+
             snapshot.forEach { node ->
                 pool.submit {
                     val hp = parseHostPort(node)
@@ -455,11 +329,11 @@ class MainActivity : Activity() {
             }
             pool.shutdown()
             while (!pool.isTerminated) Thread.sleep(50)
-            results.sortBy { it.second }
+            results.sortBy { it.second } // 按延迟从小到大排序
             scored.clear(); scored.addAll(results)
             nodes.clear(); nodes.addAll(results.map { it.first })
             runOnUiThread {
-                status.text = "测速完成：精选出 ${results.size} 个有效节点（已按延迟排好序）"
+                status.text = "测速完成：精选出 ${results.size} 个优质可用节点（已按延迟升序排序）"
             }
         }
     }
@@ -484,7 +358,7 @@ class MainActivity : Activity() {
 
     private fun exportFile(clash: Boolean) {
         if (nodes.isEmpty()) {
-            status.text = "没有可导出的节点，请先更新/测速"
+            status.text = "没有可导出的节点，请先更新并测速"
             return
         }
         val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 100
@@ -581,7 +455,7 @@ class MainActivity : Activity() {
                             if (tls) {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
-                                
+
                                 if (isReality) {
                                     val pbk = queryMap["pbk"]?.trim() ?: ""
                                     val sid = queryMap["sid"]?.trim() ?: ""
@@ -737,7 +611,7 @@ class MainActivity : Activity() {
                 contentResolver.openOutputStream(data.data!!).use { out ->
                     out?.write((pendingExport ?: "").toByteArray(Charsets.UTF_8))
                 }
-                status.text = "导出完成"
+                status.text = "导出成功"
             } catch (e: Exception) {
                 status.text = "导出失败：${e.message}"
             }
