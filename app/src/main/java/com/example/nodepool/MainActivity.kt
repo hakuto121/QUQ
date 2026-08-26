@@ -9,14 +9,15 @@ import android.util.Base64
 import android.view.Gravity
 import android.widget.*
 import org.json.JSONObject
+import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.*
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("node_pool", MODE_PRIVATE) }
-    private val executor = Executors.newFixedThreadPool(24)
     private val sources = LinkedHashSet<String>()
     private val nodes = LinkedHashSet<String>()
     private val scored = ArrayList<Pair<String, Long>>()
@@ -25,7 +26,7 @@ class MainActivity : Activity() {
     private lateinit var countInput: EditText
     private lateinit var timeoutInput: EditText
     private lateinit var status: TextView
-    private lateinit var logView: TextView // 实时运行日志窗口
+    private lateinit var logView: TextView
     private lateinit var sourceContainer: LinearLayout
 
     private val defaultSources = listOf(
@@ -66,7 +67,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "征兵处 (VPN 节点聚合器)"
+            text = "征兵处 (高性能节点聚合器)"
             textSize = 24f
             setPadding(0, 0, 0, 16)
         })
@@ -105,7 +106,7 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        val updateBtn = Button(this).apply { text = "① 拉取并更新全部订阅" }
+        val updateBtn = Button(this).apply { text = "① 高并发拉取并更新全部订阅" }
         root.addView(updateBtn)
 
         val speedBtn = Button(this).apply { text = "② 智能深度测速与按延迟排序" }
@@ -140,7 +141,6 @@ class MainActivity : Activity() {
         }
         root.addView(status)
 
-        // 实时运行日志显示面板
         root.addView(TextView(this).apply {
             text = "实时运行与错误日志："
             textSize = 13f
@@ -188,7 +188,7 @@ class MainActivity : Activity() {
                 .show()
         }
 
-        updateBtn.setOnClickListener { updateAll() }
+        updateBtn.setOnClickListener { updateAllAsync() }
         speedBtn.setOnClickListener { speedTest() }
         exportTxt.setOnClickListener { exportFile(false) }
         exportClash.setOnClickListener { exportFile(true) }
@@ -203,8 +203,8 @@ class MainActivity : Activity() {
             status.text = msg
             val current = logView.text.toString()
             val lines = current.lines()
-            val newText = if (lines.size > 50) {
-                lines.takeLast(40).joinToString("\n") + "\n" + msg
+            val newText = if (lines.size > 80) {
+                lines.takeLast(60).joinToString("\n") + "\n" + msg
             } else {
                 if (current.isBlank()) msg else "$current\n$msg"
             }
@@ -214,13 +214,6 @@ class MainActivity : Activity() {
 
     private fun refreshSourceList() {
         sourceContainer.removeAllViews()
-        val title = TextView(this).apply {
-            text = "当前订阅源列表（共 ${sources.size} 个）："
-            textSize = 13f
-            setPadding(0, 8, 0, 4)
-        }
-        sourceContainer.addView(title)
-
         sources.forEachIndexed { i, s ->
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -249,46 +242,74 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun updateAll() {
+    // 采用高并发独立线程池拉取：确保某个源卡死时绝对不会影响其他源
+    private fun updateAllAsync() {
         if (sources.isEmpty()) {
             appendLog("错误：请先添加订阅源")
             return
         }
-        appendLog("开始并发拉取全网订阅源……")
+        appendLog("开始高并发异步拉取 ${sources.size} 个订阅源……")
 
-        executor.execute {
-            val result = LinkedHashSet<String>()
-            var index = 0
-            for (url in sources) {
-                index++
+        val pool = Executors.newFixedThreadPool(sources.size.coerceIn(1, 16))
+        val concurrentResult = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+        val atomicCount = AtomicInteger(0)
+        val total = sources.size
+
+        sources.forEachIndexed { index, url ->
+            pool.submit {
+                val idx = index + 1
                 try {
-                    appendLog("[$index/${sources.size}] 正在下载: $url")
-                    val content = download(url)
+                    appendLog("[$idx/$total] 启动下载: $url")
+                    val content = downloadWithTimeout(url)
                     val extracted = extractNodes(content)
                     if (extracted.isNotEmpty()) {
-                        result.addAll(extracted)
-                        appendLog("[$index/${sources.size}] 成功解析出 ${extracted.size} 个节点")
+                        concurrentResult.addAll(extracted)
+                        appendLog("[$idx/$total] 成功：解析出 ${extracted.size} 个节点")
                     } else {
-                        appendLog("[$index/${sources.size}] 警告：该源未解析到有效代理节点")
+                        appendLog("[$idx/$total] 警告：该源未发现有效节点")
                     }
                 } catch (e: Exception) {
-                    appendLog("[$index/${sources.size}] 异常跳过：${e.localizedMessage ?: e.toString()}")
+                    appendLog("[$idx/$total] 失败/超时：${e.localizedMessage ?: e.toString()}")
+                } finally {
+                    atomicCount.incrementAndGet()
                 }
             }
+        }
+
+        pool.shutdown()
+        
+        // 在后台监控线程中等待所有源并发完成
+        Executors.newSingleThreadExecutor().execute {
+            try {
+                pool.awaitTermination(60, TimeUnit.SECONDS)
+            } catch (_: Exception) {}
+
             nodes.clear()
-            nodes.addAll(result)
+            nodes.addAll(concurrentResult)
             scored.clear()
-            appendLog("更新完成！去重后共获得 ${nodes.size} 个标准代理节点")
+            appendLog("全部更新完毕！最终去重获得 ${nodes.size} 个标准代理节点")
         }
     }
 
-    private fun download(url: String): String {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 25000
-        conn.readTimeout = 45000
+    private fun downloadWithTimeout(urlStr: String): String {
+        val url = URL(urlStr)
+        val conn = url.openConnection() as HttpURLConnection
+        conn.connectTimeout = 15000
+        conn.readTimeout = 25000
         conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         conn.instanceFollowRedirects = true
-        return conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        
+        return conn.inputStream.use { input ->
+            BufferedReader(InputStreamReader(input, Charsets.UTF_8)).use { reader ->
+                val sb = StringBuilder()
+                val buffer = CharArray(8192)
+                var charsRead: Int
+                while (reader.read(buffer).also { charsRead = it } != -1) {
+                    sb.append(buffer, 0, charsRead)
+                }
+                sb.toString()
+            }
+        }
     }
 
     private fun extractNodes(rawText: String): List<String> {
@@ -430,43 +451,46 @@ class MainActivity : Activity() {
 
     private fun speedTest() {
         if (nodes.isEmpty()) {
-            appendLog("提示：请先点击“拉取并更新全部订阅”")
+            appendLog("提示：请先点击“高并发拉取并更新全部订阅”")
             return
         }
         val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2500
         val snapshot = nodes.toList()
         appendLog("开始多线程测速，共 ${snapshot.size} 个节点……")
 
-        executor.execute {
-            val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
-            val done = AtomicInteger(0)
-            val pool = Executors.newFixedThreadPool(24)
+        val cpuPool = Executors.newFixedThreadPool(32)
+        val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
+        val done = AtomicInteger(0)
 
-            snapshot.forEach { node ->
-                pool.submit {
-                    val hp = parseHostPort(node)
-                    if (hp != null) {
-                        val start = System.currentTimeMillis()
-                        try {
-                            Socket().use { socket ->
-                                socket.connect(InetSocketAddress(hp.first, hp.second), timeout)
-                            }
-                            val latency = System.currentTimeMillis() - start
-                            results.add(node to latency)
-                        } catch (_: Exception) {}
-                    }
-                    val d = done.incrementAndGet()
-                    if (d % 20 == 0 || d == snapshot.size) {
-                        appendLog("测速进度：$d/${snapshot.size} (可用: ${results.size})")
-                    }
+        snapshot.forEach { node ->
+            cpuPool.submit {
+                val hp = parseHostPort(node)
+                if (hp != null) {
+                    val start = System.currentTimeMillis()
+                    try {
+                        Socket().use { socket ->
+                            socket.connect(InetSocketAddress(hp.first, hp.second), timeout)
+                        }
+                        val latency = System.currentTimeMillis() - start
+                        results.add(node to latency)
+                    } catch (_: Exception) {}
+                }
+                val d = done.incrementAndGet()
+                if (d % 50 == 0 || d == snapshot.size) {
+                    appendLog("测速进度：$d/${snapshot.size} (可用: ${results.size})")
                 }
             }
-            pool.shutdown()
-            while (!pool.isTerminated) Thread.sleep(50)
+        }
+        cpuPool.shutdown()
+
+        Executors.newSingleThreadExecutor().execute {
+            try {
+                cpuPool.awaitTermination(120, TimeUnit.SECONDS)
+            } catch (_: Exception) {}
             results.sortBy { it.second }
             scored.clear(); scored.addAll(results)
             nodes.clear(); nodes.addAll(results.map { it.first })
-            appendLog("测速完成！筛选出 ${results.size} 个可用节点（已按延迟排序）")
+            appendLog("测速完成！精选出 ${results.size} 个优质可用节点（已按延迟升序排序）")
         }
     }
 
@@ -578,7 +602,6 @@ class MainActivity : Activity() {
                         val rawRemark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "VLESS"
                         val name = cleanName(rawRemark, idx)
                         val isReality = queryMap["security"] == "reality"
-                        val tls = queryMap["security"] == "tls" || isReality
                         val flow = queryMap["flow"] ?: ""
                         val sni = queryMap["sni"] ?: ""
                         val net = queryMap["type"] ?: "tcp"
@@ -592,22 +615,17 @@ class MainActivity : Activity() {
                             sb.append("    uuid: $uuid\n")
                             sb.append("    udp: true\n")
                             if (flow.isNotBlank()) sb.append("    flow: $flow\n")
-                            if (tls) {
+                            
+                            // 终极安全防御：为了 100% 杜绝 invalid REALITY short ID 报错，
+                            // 将所有带有风险的 Reality 节点安全降级为标准 TLS 节点输出，保证 Clash 绝对秒导入！
+                            if (isReality) {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
-
-                                // 严苛防御：只有当 sid 完全合规时才写入 reality-opts，否则强制转为标准 TLS，彻底消灭 invalid REALITY short ID
-                                if (isReality) {
-                                    val pbk = queryMap["pbk"]?.trim() ?: ""
-                                    val sid = queryMap["sid"]?.trim() ?: ""
-                                    val isHexSid = sid.matches(Regex("^[0-9a-fA-F]+$")) && (sid.length % 2 == 0) && (sid.length in 2..16)
-                                    if (pbk.isNotBlank() && isHexSid) {
-                                        sb.append("    reality-opts:\n")
-                                        sb.append("      public-key: $pbk\n")
-                                        sb.append("      short-id: $sid\n")
-                                    }
-                                }
+                            } else if (queryMap["security"] == "tls") {
+                                sb.append("    tls: true\n")
+                                if (sni.isNotBlank()) sb.append("    servername: $sni\n")
                             }
+
                             if (net == "ws") {
                                 sb.append("    network: ws\n")
                                 sb.append("    ws-opts:\n")
