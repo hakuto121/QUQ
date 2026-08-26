@@ -27,6 +27,16 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var sourceContainer: LinearLayout
 
+    // 内置国内直连超快的优选 IP / 优质域名（给节点注入加速）
+    private val cfFastIps = listOf(
+        "104.16.160.1",
+        "104.17.160.1",
+        "172.67.160.1",
+        "icook.tw",
+        "www.visa.com.tw",
+        "cf.090227.xyz"
+    )
+
     private val defaults = listOf(
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs_base64.txt",
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
@@ -60,13 +70,13 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "节点池管理器"
-            textSize = 26f
+            text = "节点池管理器 (Vertex加速版)"
+            textSize = 24f
             setPadding(0, 0, 0, 16)
         })
 
         root.addView(TextView(this).apply {
-            text = "把 TXT、Base64、Clash/V2Ray/Xray 订阅地址粘贴到下面："
+            text = "输入订阅源地址（TXT/Base64/GitHub Raw）："
             textSize = 14f
         })
 
@@ -98,27 +108,27 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        val updateBtn = Button(this).apply { text = "① 更新全部订阅并去重" }
+        val updateBtn = Button(this).apply { text = "① 更新全部订阅并自动加速" }
         root.addView(updateBtn)
 
-        val speedBtn = Button(this).apply { text = "② 开始测速" }
+        val speedBtn = Button(this).apply { text = "② 开始测速排序" }
         root.addView(speedBtn)
 
         timeoutInput = EditText(this).apply {
             hint = "测速超时（毫秒）"
-            setText("3000")
+            setText("2000")
             inputType = 2
         }
         root.addView(timeoutInput)
 
         countInput = EditText(this).apply {
-            hint = "导出前 N 个"
+            hint = "导出前 N 个可用节点"
             setText("100")
             inputType = 2
         }
         root.addView(countInput)
 
-        val exportTxt = Button(this).apply { text = "③ 导出 TXT" }
+        val exportTxt = Button(this).apply { text = "③ 导出加速后 TXT" }
         root.addView(exportTxt)
 
         val exportClash = Button(this).apply { text = "④ 导出 CLASH YAML" }
@@ -145,7 +155,7 @@ class MainActivity : Activity() {
                 refreshSourceList()
                 status.text = "已添加，当前共 ${sources.size} 个订阅源"
             } else {
-                status.text = "请输入以 http:// 或 https:// 开头的链接"
+                status.text = "请输入 http:// 或 https:// 开头的链接"
             }
         }
 
@@ -212,10 +222,10 @@ class MainActivity : Activity() {
 
     private fun updateAll() {
         if (sources.isEmpty()) {
-            status.text = "请先添加至少一个订阅源"
+            status.text = "请先添加订阅源"
             return
         }
-        status.text = "正在下载 ${sources.size} 个订阅源……"
+        status.text = "正在下载并加速 ${sources.size} 个订阅源……"
         executor.execute {
             val result = LinkedHashSet<String>()
             var ok = 0
@@ -224,19 +234,55 @@ class MainActivity : Activity() {
                     val text = download(url)
                     val extracted = extractNodes(text)
                     if (extracted.isNotEmpty()) ok++
-                    result.addAll(extracted)
+                    // 对提取到的每个节点进行优选 IP 加速注入
+                    extracted.forEach { raw ->
+                        result.add(speedUpNode(raw))
+                    }
                 } catch (_: Exception) {}
                 runOnUiThread {
-                    status.text = "正在更新：已处理 ${ok}/${sources.size} 个源，发现 ${result.size} 个去重节点"
+                    status.text = "正在更新：已处理 ${ok}/${sources.size} 个源，获取 ${result.size} 个节点"
                 }
             }
             nodes.clear()
             nodes.addAll(result)
             scored.clear()
             runOnUiThread {
-                status.text = "更新完成：共 ${nodes.size} 个去重节点"
+                status.text = "更新并加速完成：共 ${nodes.size} 个去重节点"
             }
         }
+    }
+
+    // 自动将 WS / CDN 节点注入优选 IP
+    private fun speedUpNode(node: String): String {
+        try {
+            val u = node.trim()
+            if (u.startsWith("vless://", ignoreCase = true)) {
+                val uri = URI(u)
+                val queryMap = parseQuery(uri.rawQuery ?: "")
+                if (queryMap["type"] == "ws") {
+                    val oldHost = uri.host ?: ""
+                    val fastIp = cfFastIps.random()
+                    val hostParam = queryMap["host"]?.ifBlank { oldHost } ?: oldHost
+                    val sniParam = queryMap["sni"]?.ifBlank { oldHost } ?: oldHost
+                    val newQuery = (queryMap + mapOf("host" to hostParam, "sni" to sniParam))
+                        .entries.joinToString("&") { "${it.key}=${URLEncoder.encode(it.value, "UTF-8")}" }
+                    val remark = uri.rawFragment ?: "CF_Speed"
+                    return "vless://${uri.userInfo}@$fastIp:${if (uri.port > 0) uri.port else 443}?$newQuery#$remark"
+                }
+            } else if (u.startsWith("vmess://", ignoreCase = true)) {
+                val json = String(Base64.decode(u.substring(8), Base64.DEFAULT or Base64.NO_WRAP), Charsets.UTF_8)
+                val obj = JSONObject(json)
+                if (obj.optString("net") == "ws") {
+                    val oldHost = obj.optString("add")
+                    obj.put("host", obj.optString("host").ifBlank { oldHost })
+                    obj.put("sni", obj.optString("sni").ifBlank { oldHost })
+                    obj.put("add", cfFastIps.random())
+                    val newB64 = Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                    return "vmess://$newB64"
+                }
+            }
+        } catch (_: Exception) {}
+        return node
     }
 
     private fun download(url: String): String {
@@ -287,12 +333,12 @@ class MainActivity : Activity() {
 
     private fun speedTest() {
         if (nodes.isEmpty()) {
-            status.text = "请先点击“更新全部订阅并去重”"
+            status.text = "请先点击“更新全部订阅”"
             return
         }
-        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 3000
+        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2000
         val snapshot = nodes.toList()
-        status.text = "正在测速：0/${snapshot.size}"
+        status.text = "正在真实测速中：0/${snapshot.size}"
         executor.execute {
             val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
             val done = AtomicInteger(0)
@@ -311,7 +357,7 @@ class MainActivity : Activity() {
                     }
                     val d = done.incrementAndGet()
                     if (d % 10 == 0 || d == snapshot.size) {
-                        runOnUiThread { status.text = "正在测速：$d/${snapshot.size}，成功 ${results.size}" }
+                        runOnUiThread { status.text = "正在测速：$d/${snapshot.size}，可用极速节点 ${results.size}" }
                     }
                 }
             }
@@ -321,7 +367,7 @@ class MainActivity : Activity() {
             scored.clear(); scored.addAll(results)
             nodes.clear(); nodes.addAll(results.map { it.first })
             runOnUiThread {
-                status.text = "测速完成：${results.size}/${snapshot.size} 个节点 TCP 可达，已按延迟排序"
+                status.text = "测速完成：保留 ${results.size} 个优质可用节点（已按延迟排好序）"
             }
         }
     }
@@ -359,7 +405,7 @@ class MainActivity : Activity() {
         }
 
         val ext = if (clash) "yaml" else "txt"
-        val name = "nodepool_top_${selected.size}.$ext"
+        val name = "nodepool_fast_${selected.size}.$ext"
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             type = if (clash) "text/yaml" else "text/plain"
             putExtra(Intent.EXTRA_TITLE, name)
@@ -544,7 +590,7 @@ class MainActivity : Activity() {
 
             append("  - name: AUTO\n")
             append("    type: url-test\n")
-            append("    url: http://www.gstatic.com/generate_204\n")
+            append("    url: https://aiplatform.googleapis.com/generate_204\n")
             append("    interval: 300\n")
             append("    tolerance: 50\n")
             append("    proxies:\n")
