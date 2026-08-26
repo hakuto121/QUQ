@@ -27,7 +27,6 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var sourceContainer: LinearLayout
 
-    // 内置国内直连超快的优选 IP / 优质域名（给节点注入加速）
     private val cfFastIps = listOf(
         "104.16.160.1",
         "104.17.160.1",
@@ -198,7 +197,7 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, 4, 0, 4)
             }
-            val text = TextView(this).apply {
+            val labelView = TextView(this).apply {
                 text = "${i + 1}. $s"
                 textSize = 12f
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -214,7 +213,7 @@ class MainActivity : Activity() {
                     status.text = "已删除 1 个订阅源，剩余 ${sources.size} 个"
                 }
             }
-            row.addView(text)
+            row.addView(labelView)
             row.addView(delBtn)
             sourceContainer.addView(row)
         }
@@ -231,10 +230,9 @@ class MainActivity : Activity() {
             var ok = 0
             for (url in sources) {
                 try {
-                    val text = download(url)
-                    val extracted = extractNodes(text)
+                    val content = download(url)
+                    val extracted = extractNodes(content)
                     if (extracted.isNotEmpty()) ok++
-                    // 对提取到的每个节点进行优选 IP 加速注入
                     extracted.forEach { raw ->
                         result.add(speedUpNode(raw))
                     }
@@ -252,7 +250,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // 自动将 WS / CDN 节点注入优选 IP
     private fun speedUpNode(node: String): String {
         try {
             val u = node.trim()
