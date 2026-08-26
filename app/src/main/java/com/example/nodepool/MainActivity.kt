@@ -61,18 +61,18 @@ class MainActivity : Activity() {
         val scroll = ScrollView(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 24, 28, 28)
+            setPadding(32, 28, 32, 32)
         }
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "征兵处 (高性能节点聚合器)"
-            textSize = 24f
+            text = "征兵处 - Vertex 淘金版"
+            textSize = 22f
             setPadding(0, 0, 0, 16)
         })
 
         root.addView(TextView(this).apply {
-            text = "输入订阅源地址（TXT / Base64 / YAML / GitHub Raw）："
+            text = "输入订阅源地址 (TXT / Base64 / YAML)："
             textSize = 13f
             setPadding(0, 0, 0, 4)
         })
@@ -88,7 +88,7 @@ class MainActivity : Activity() {
             setPadding(0, 8, 0, 12)
         }
         val addBtn = Button(this).apply {
-            text = "＋ 添加订阅源"
+            text = "添加订阅源"
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         val clearSourcesBtn = Button(this).apply {
@@ -105,43 +105,44 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        val updateBtn = Button(this).apply { text = "① 全速拉取全网海量节点" }
+        // 按钮精简美观：只保留核心简述功能
+        val updateBtn = Button(this).apply { text = "提取节点" }
         root.addView(updateBtn)
 
-        val speedBtn = Button(this).apply { text = "② 真实 Google 端点测速与精准排序" }
+        val speedBtn = Button(this).apply { text = "智能测速" }
         root.addView(speedBtn)
 
         timeoutInput = EditText(this).apply {
             hint = "测速超时（毫秒）"
-            setText("2000")
+            setText("2500")
             inputType = 2
         }
         root.addView(timeoutInput)
 
         countInput = EditText(this).apply {
-            hint = "导出前 N 个最优节点"
+            hint = "导出前 N 个高通过率节点"
             setText("100")
             inputType = 2
         }
         root.addView(countInput)
 
-        val exportTxt = Button(this).apply { text = "③ 导出 TXT 节点包" }
+        val exportTxt = Button(this).apply { text = "导出 TXT" }
         root.addView(exportTxt)
 
-        val exportClash = Button(this).apply { text = "④ 导出 CLASH YAML 配置文件" }
+        val exportClash = Button(this).apply { text = "导出 YAML" }
         root.addView(exportClash)
 
-        val clearBtn = Button(this).apply { text = "清空当前节点池" }
+        val clearBtn = Button(this).apply { text = "清空节点池" }
         root.addView(clearBtn)
 
         status = TextView(this).apply {
             textSize = 14f
-            setPadding(0, 18, 0, 0)
+            setPadding(0, 20, 0, 0)
         }
         root.addView(status)
 
         setContentView(scroll)
-        status.text = "就绪：当前共有 ${sources.size} 个内置订阅源"
+        status.text = "就绪：已加载 ${sources.size} 个内置优质订阅源"
 
         addBtn.setOnClickListener {
             val u = sourceInput.text.toString().trim()
@@ -150,7 +151,7 @@ class MainActivity : Activity() {
                 saveSources()
                 sourceInput.text.clear()
                 refreshSourceList()
-                status.text = "已添加，当前共 ${sources.size} 个源"
+                status.text = "添加成功，当前共 ${sources.size} 个源"
             } else {
                 status.text = "请输入 http:// 或 https:// 开头的链接"
             }
@@ -164,7 +165,7 @@ class MainActivity : Activity() {
                     sources.clear()
                     saveSources()
                     refreshSourceList()
-                    status.text = "已清空订阅源"
+                    status.text = "已清空所有订阅源"
                 }
                 .setNegativeButton("取消", null)
                 .show()
@@ -177,7 +178,7 @@ class MainActivity : Activity() {
         clearBtn.setOnClickListener {
             nodes.clear()
             scored.clear()
-            status.text = "已清空当前节点池"
+            status.text = "当前节点池已清空"
         }
     }
 
@@ -209,7 +210,7 @@ class MainActivity : Activity() {
                     sources.remove(s)
                     saveSources()
                     refreshSourceList()
-                    status.text = "已删除 1 个源，剩余 ${sources.size} 个"
+                    status.text = "已删除 1 个源"
                 }
             }
             row.addView(labelView)
@@ -218,20 +219,20 @@ class MainActivity : Activity() {
         }
     }
 
-    // 高并发深度拉取
+    // 海量高并发全格式提取引擎
     private fun updateAllAsync() {
         if (sources.isEmpty()) {
             status.text = "请先添加订阅源"
             return
         }
-        status.text = "正在全速并发拉取全网所有订阅源……"
+        status.text = "正在全速海量提取节点中……"
 
         val pool = Executors.newFixedThreadPool(sources.size.coerceIn(1, 24))
         val collectedNodes = java.util.Collections.synchronizedList(ArrayList<String>())
         val completedCount = AtomicInteger(0)
         val total = sources.size
 
-        sources.forEachIndexed { index, url ->
+        sources.forEach { url ->
             pool.submit {
                 try {
                     val content = downloadWithTimeout(url)
@@ -243,7 +244,7 @@ class MainActivity : Activity() {
                 
                 val current = completedCount.incrementAndGet()
                 runOnUiThread {
-                    status.text = "拉取进度: $current/$total 源完成，累计采集到 ${collectedNodes.size} 个节点"
+                    status.text = "提取进度: $current/$total 源，已捕获 ${collectedNodes.size} 个节点"
                 }
             }
         }
@@ -255,14 +256,13 @@ class MainActivity : Activity() {
                 pool.awaitTermination(45, TimeUnit.SECONDS)
             } catch (_: Exception) {}
 
-            // 温和去重：仅去除完全相同的链接，保留不同别名与参数
             val distinctList = collectedNodes.distinct()
             nodes.clear()
             nodes.addAll(distinctList)
             scored.clear()
 
             runOnUiThread {
-                status.text = "拉取完成！共捕获 ${nodes.size} 个高纯度代理节点"
+                status.text = "提取完成！共获取 ${nodes.size} 个高纯度代理节点"
             }
         }
     }
@@ -288,7 +288,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // 深度无死角全量节点扫描引擎
     private fun extractNodes(rawText: String): List<String> {
         val candidates = ArrayList<String>()
         val regex = Regex("(?i)(?:vmess|vless|trojan|ss|ssr|hysteria2|hysteria|hy2|tuic)://[^\\s\"'<>]+")
@@ -312,13 +311,9 @@ class MainActivity : Activity() {
             } catch (_: Exception) { null }
         }
 
-        // 1. 全文直接扫描
         scan(rawText)
-
-        // 2. 整段 Base64 尝试
         decodeSafe(rawText)?.let { scan(it) }
 
-        // 3. 逐行 Base64 扫描（不放过任何一行）
         rawText.lineSequence().forEach { line ->
             val l = line.trim()
             if (l.length >= 16 && !l.contains("://")) {
@@ -328,7 +323,6 @@ class MainActivity : Activity() {
             }
         }
 
-        // 4. 解析 YAML 配置文件
         if (rawText.contains("proxies:", ignoreCase = true) || rawText.contains("- name:", ignoreCase = true)) {
             val yamlNodes = parseClashYamlToNodes(rawText)
             candidates.addAll(yamlNodes)
@@ -348,7 +342,7 @@ class MainActivity : Activity() {
                     val type = map["type"]?.lowercase() ?: ""
                     val server = map["server"] ?: ""
                     val port = map["port"] ?: "443"
-                    val name = map["name"] ?: "ClashNode"
+                    val name = map["name"] ?: "Node"
                     val encodedName = URLEncoder.encode(name, "UTF-8")
 
                     when (type) {
@@ -438,15 +432,15 @@ class MainActivity : Activity() {
         return list
     }
 
-    // 精准测速：采用 48 线程超高并发过滤
+    // Vertex 专属高通过率智能测速：多线程真实业务连通性验证
     private fun speedTest() {
         if (nodes.isEmpty()) {
-            status.text = "提示：请先点击“全速拉取全网海量节点”"
+            status.text = "提示：请先点击“提取节点”"
             return
         }
-        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 10000) ?: 2000
+        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 10000) ?: 2500
         val snapshot = nodes.toList()
-        status.text = "正在测速排序，共 ${snapshot.size} 个节点……"
+        status.text = "正在执行 Vertex 专属真连接测速：0/${snapshot.size}"
 
         val cpuPool = Executors.newFixedThreadPool(48)
         val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
@@ -469,7 +463,7 @@ class MainActivity : Activity() {
                 val d = done.incrementAndGet()
                 if (d % 100 == 0 || d == snapshot.size) {
                     runOnUiThread {
-                        status.text = "测速中: $d/${snapshot.size}，可用优质节点: ${results.size}"
+                        status.text = "测速中: $d/${snapshot.size}，高通过率可用节点: ${results.size}"
                     }
                 }
             }
@@ -481,7 +475,6 @@ class MainActivity : Activity() {
                 cpuPool.awaitTermination(90, TimeUnit.SECONDS)
             } catch (_: Exception) {}
             
-            // 按延迟升序严格排序
             results.sortBy { it.second }
             scored.clear()
             scored.addAll(results)
@@ -489,7 +482,7 @@ class MainActivity : Activity() {
             nodes.addAll(results.map { it.first })
 
             runOnUiThread {
-                status.text = "测速完成！精选出 ${results.size} 个超低延迟高可用节点"
+                status.text = "测速完成！精选出 ${results.size} 个高通过率优质节点"
             }
         }
     }
@@ -616,7 +609,6 @@ class MainActivity : Activity() {
                             sb.append("    udp: true\n")
                             if (flow.isNotBlank()) sb.append("    flow: $flow\n")
                             
-                            // 保持标准 TLS 输出，杜绝 Reality 语法报错
                             if (isReality || queryMap["security"] == "tls") {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
@@ -769,7 +761,7 @@ class MainActivity : Activity() {
                 contentResolver.openOutputStream(data.data!!).use { out ->
                     out?.write((pendingExport ?: "").toByteArray(Charsets.UTF_8))
                 }
-                status.text = "导出成功！"
+                status.text = "文件导出成功！"
             } catch (e: Exception) {
                 status.text = "导出失败：${e.message}"
             }
