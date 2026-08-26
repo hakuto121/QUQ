@@ -26,6 +26,7 @@ class MainActivity : Activity() {
     private lateinit var timeoutInput: EditText
     private lateinit var status: TextView
     private lateinit var sourceContainer: LinearLayout
+    private lateinit var modeSwitch: Switch
 
     private val cfFastIps = listOf(
         "104.16.160.1",
@@ -69,10 +70,22 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "节点池管理器 (高存活加速版)"
+            text = "节点池管理器 (双模加速版)"
             textSize = 24f
             setPadding(0, 0, 0, 16)
         })
+
+        // 环境切换开关
+        modeSwitch = Switch(this).apply {
+            text = "当前模式：VPN 极速模式（关闭则为：国内裸连模式）"
+            isChecked = true
+            textSize = 14f
+            setPadding(0, 0, 0, 12)
+            setOnCheckedChangeListener { _, isChecked ->
+                text = if (isChecked) "当前模式：VPN 极速模式" else "当前模式：国内裸连模式（自动优选注入）"
+            }
+        }
+        root.addView(modeSwitch)
 
         root.addView(TextView(this).apply {
             text = "输入订阅源地址（TXT/Base64/GitHub Raw）："
@@ -107,10 +120,10 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        val updateBtn = Button(this).apply { text = "① 更新全部订阅并自动加速" }
+        val updateBtn = Button(this).apply { text = "① 更新全部订阅" }
         root.addView(updateBtn)
 
-        val speedBtn = Button(this).apply { text = "② 深度测速与存活筛选" }
+        val speedBtn = Button(this).apply { text = "② 智能深度测速与筛选" }
         root.addView(speedBtn)
 
         timeoutInput = EditText(this).apply {
@@ -224,7 +237,9 @@ class MainActivity : Activity() {
             status.text = "请先添加订阅源"
             return
         }
-        status.text = "正在下载并加速 ${sources.size} 个订阅源……"
+        val isVpnMode = modeSwitch.isChecked
+        status.text = if (isVpnMode) "正在下载 ${sources.size} 个订阅源（VPN模式）……" else "正在下载并应用国内优选加速（裸连模式）……"
+        
         executor.execute {
             val result = LinkedHashSet<String>()
             var ok = 0
@@ -233,8 +248,14 @@ class MainActivity : Activity() {
                     val content = download(url)
                     val extracted = extractNodes(content)
                     if (extracted.isNotEmpty()) ok++
+                    
                     extracted.forEach { raw ->
-                        result.add(speedUpNode(raw))
+                        // 如果是国内裸连模式，自动注入优选加速 IP
+                        if (!isVpnMode) {
+                            result.add(speedUpNode(raw))
+                        } else {
+                            result.add(raw)
+                        }
                     }
                 } catch (_: Exception) {}
                 runOnUiThread {
@@ -245,7 +266,7 @@ class MainActivity : Activity() {
             nodes.addAll(result)
             scored.clear()
             runOnUiThread {
-                status.text = "更新并加速完成：共 ${nodes.size} 个去重节点"
+                status.text = "更新完成：共 ${nodes.size} 个去重节点"
             }
         }
     }
@@ -263,7 +284,7 @@ class MainActivity : Activity() {
                     val sniParam = queryMap["sni"]?.ifBlank { oldHost } ?: oldHost
                     val newQuery = (queryMap + mapOf("host" to hostParam, "sni" to sniParam))
                         .entries.joinToString("&") { "${it.key}=${URLEncoder.encode(it.value, "UTF-8")}" }
-                    val remark = uri.rawFragment ?: "CF_Speed"
+                    val remark = uri.rawFragment ?: "CF_Direct"
                     return "vless://${uri.userInfo}@$fastIp:${if (uri.port > 0) uri.port else 443}?$newQuery#$remark"
                 }
             } else if (u.startsWith("vmess://", ignoreCase = true)) {
@@ -328,43 +349,46 @@ class MainActivity : Activity() {
         return candidates.toList()
     }
 
-    // 升级版深度测速：结合 TCP 握手 + Google 真实业务 HTTP 探测，剔除僵尸/伪存活节点
     private fun speedTest() {
         if (nodes.isEmpty()) {
             status.text = "请先点击“更新全部订阅”"
             return
         }
         val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2500
+        val isVpnMode = modeSwitch.isChecked
         val snapshot = nodes.toList()
-        status.text = "正在进行深度可用性测速：0/${snapshot.size}"
+        status.text = if (isVpnMode) "正在进行高并发极速测速：0/${snapshot.size}" else "正在进行国内裸连与 API 探测：0/${snapshot.size}"
+
         executor.execute {
             val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
             val done = AtomicInteger(0)
             val pool = Executors.newFixedThreadPool(24)
+            
             snapshot.forEach { node ->
                 pool.submit {
                     val hp = parseHostPort(node)
                     if (hp != null) {
                         val start = System.currentTimeMillis()
                         try {
-                            // 1. TCP 基础连通性握手
                             Socket().use { socket ->
                                 socket.connect(InetSocketAddress(hp.first, hp.second), timeout)
                             }
                             
-                            // 2. 真实业务 HTTP 探测（测试是否真正可达 Google 生成服务）
-                            val conn = URL("https://aiplatform.googleapis.com/generate_204").openConnection() as HttpURLConnection
-                            conn.connectTimeout = timeout
-                            conn.readTimeout = timeout
-                            conn.responseCode // 触发实际通信
-                            
+                            // 如果是国内裸连模式，增加一层真实的 Google 探测以确保可用性
+                            if (!isVpnMode) {
+                                val conn = URL("https://aiplatform.googleapis.com/generate_204").openConnection() as HttpURLConnection
+                                conn.connectTimeout = timeout
+                                conn.readTimeout = timeout
+                                conn.responseCode
+                            }
+
                             val latency = System.currentTimeMillis() - start
                             results.add(node to latency)
                         } catch (_: Exception) {}
                     }
                     val d = done.incrementAndGet()
                     if (d % 10 == 0 || d == snapshot.size) {
-                        runOnUiThread { status.text = "深度测速中：$d/${snapshot.size}，高存活有效节点 ${results.size}" }
+                        runOnUiThread { status.text = "测速中：$d/${snapshot.size}，可用节点 ${results.size}" }
                     }
                 }
             }
@@ -374,7 +398,7 @@ class MainActivity : Activity() {
             scored.clear(); scored.addAll(results)
             nodes.clear(); nodes.addAll(results.map { it.first })
             runOnUiThread {
-                status.text = "测速完成：精筛出 ${results.size} 个高可用极速节点（已按延迟排序）"
+                status.text = "测速完成：精筛出 ${results.size} 个有效节点（已按延迟排好序）"
             }
         }
     }
@@ -412,7 +436,7 @@ class MainActivity : Activity() {
         }
 
         val ext = if (clash) "yaml" else "txt"
-        val name = "nodepool_fast_${selected.size}.$ext"
+        val name = "nodepool_export_${selected.size}.$ext"
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             type = if (clash) "text/yaml" else "text/plain"
             putExtra(Intent.EXTRA_TITLE, name)
@@ -496,9 +520,13 @@ class MainActivity : Activity() {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
                                 if (queryMap["security"] == "reality") {
-                                    sb.append("    reality-opts:\n")
-                                    queryMap["pbk"]?.let { sb.append("      public-key: $it\n") }
-                                    queryMap["sid"]?.let { sb.append("      short-id: $it\n") }
+                                    val pbk = queryMap["pbk"]
+                                    val sid = queryMap["sid"]
+                                    if (!pbk.isNullOrBlank() && !sid.isNullOrBlank()) {
+                                        sb.append("    reality-opts:\n")
+                                        sb.append("      public-key: $pbk\n")
+                                        sb.append("      short-id: $sid\n")
+                                    }
                                 }
                             }
                             if (net == "ws") {
