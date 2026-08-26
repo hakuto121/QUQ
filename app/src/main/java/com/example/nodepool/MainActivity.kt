@@ -23,16 +23,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import javax.net.ssl.SNIHostName
-import javax.net.ssl.SSLParameters
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("node_pool", MODE_PRIVATE) }
     private val sources = LinkedHashSet<String>()
     
-    // 全量原始节点池与已验证存活节点池
+    // 原始全量池与已验证存活节点池
     private val rawNodes = Collections.synchronizedList(ArrayList<String>())
     private val validNodes = Collections.synchronizedList(ArrayList<Pair<String, Long>>())
 
@@ -98,7 +94,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "征兵处 - 节点池中枢"
+            text = "征兵处 - 极速节点池中枢"
             textSize = 20f
             setPadding(0, 0, 0, 16)
         })
@@ -131,7 +127,7 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        val step1Btn = Button(this).apply { text = "【步骤 1】全量极速抓取 (全收不漏)" }
+        val step1Btn = Button(this).apply { text = "【步骤 1】全量极速抓取 (秒解万级节点)" }
         root.addView(step1Btn)
 
         val speedRow = LinearLayout(this).apply {
@@ -139,7 +135,7 @@ class MainActivity : Activity() {
             setPadding(0, 4, 0, 4)
         }
         speedBtn = Button(this).apply {
-            text = "【步骤 2】并发精准测速"
+            text = "【步骤 2】并发极速测速"
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f)
         }
         pauseBtn = Button(this).apply {
@@ -150,7 +146,7 @@ class MainActivity : Activity() {
         speedRow.addView(pauseBtn)
         root.addView(speedRow)
 
-        val step3Btn = Button(this).apply { text = "【步骤 3】对已测节点按延迟升序排序" }
+        val step3Btn = Button(this).apply { text = "【步骤 3】对可用节点按延迟排序" }
         root.addView(step3Btn)
 
         val configRow = LinearLayout(this).apply {
@@ -160,7 +156,7 @@ class MainActivity : Activity() {
 
         timeoutInput = EditText(this).apply {
             hint = "超时(ms)"
-            setText("2000")
+            setText("1200")
             inputType = 2
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -273,7 +269,7 @@ class MainActivity : Activity() {
         }
     }
 
-    // ==================== 步骤 1：全量抓取 ====================
+    // ==================== 步骤 1：流式极速抓取 ====================
 
     private fun actionScrapeAll() {
         if (sources.isEmpty()) {
@@ -281,7 +277,7 @@ class MainActivity : Activity() {
             return
         }
         stopSpeedTestInternal()
-        status.text = "正在启动极速多线程抓取全部节点..."
+        status.text = "正在并行抓取所有订阅源..."
 
         val pool = Executors.newFixedThreadPool(sources.size.coerceIn(8, 32))
         val collected = Collections.synchronizedList(ArrayList<String>())
@@ -291,33 +287,91 @@ class MainActivity : Activity() {
         sources.forEach { url ->
             pool.submit {
                 try {
-                    val content = downloadWithTimeout(url)
-                    val extracted = extractNodesFull(content)
-                    if (extracted.isNotEmpty()) {
-                        collected.addAll(extracted)
+                    val content = downloadFast(url)
+                    if (content.isNotBlank()) {
+                        val extracted = parseNodesStream(content)
+                        if (extracted.isNotEmpty()) {
+                            collected.addAll(extracted)
+                        }
                     }
                 } catch (_: Exception) {}
 
                 val c = completedCount.incrementAndGet()
                 runOnUiThread {
-                    status.text = "抓取进度: $c/$total 完成，已捕获 ${collected.size} 个原始节点..."
+                    status.text = "抓取进度: $c/$total 完成，已提取 ${collected.size} 个原始节点..."
                 }
             }
         }
 
         pool.shutdown()
         Executors.newSingleThreadExecutor().execute {
-            try { pool.awaitTermination(120, TimeUnit.SECONDS) } catch (_: Exception) {}
+            try { pool.awaitTermination(60, TimeUnit.SECONDS) } catch (_: Exception) {}
             rawNodes.clear()
             rawNodes.addAll(collected)
             runOnUiThread {
                 updateStatusDisplay()
-                status.append("\n抓取完成！共收集 ${rawNodes.size} 个节点（未做删减）。可继续点击【步骤 2】并发测速。")
+                status.append("\n全量抓取完成！共收集 ${rawNodes.size} 个节点（未删减）。可点击【步骤 2】快速测速。")
             }
         }
     }
 
-    // ==================== 步骤 2：并发测速与暂停控制 ====================
+    private fun downloadFast(urlStr: String): String {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6000
+                readTimeout = 8000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "ClashMeta/v1.18.0 (Android; arm64-v8a)")
+                setRequestProperty("Accept", "*/*")
+            }
+            if (conn.responseCode in 200..299) {
+                conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+            } else ""
+        } catch (_: Exception) {
+            ""
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun parseNodesStream(rawText: String): List<String> {
+        val result = ArrayList<String>()
+        val prefixes = arrayOf("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "hysteria2://", "tuic://")
+
+        fun scanPlainLines(text: String) {
+            text.lineSequence().forEach { rawLine ->
+                val line = rawLine.trim().trimEnd(',', ';', ']', ')', '}', '\r', '\n')
+                if (prefixes.any { line.startsWith(it, true) }) {
+                    result.add(line)
+                }
+            }
+        }
+
+        // 1. 先进行直接明文匹配
+        scanPlainLines(rawText)
+
+        // 2. 整段 Base64 快速解码
+        val clean = rawText.replace("\\s+".toRegex(), "").replace("-", "+").replace("_", "/")
+        if (clean.length >= 16) {
+            val padLen = (4 - clean.length % 4) % 4
+            try {
+                val decodedBytes = Base64.decode(clean + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP)
+                val decodedText = String(decodedBytes, StandardCharsets.UTF_8)
+                scanPlainLines(decodedText)
+            } catch (_: Exception) {}
+        }
+
+        // 3. Clash YAML proxies 提取
+        if (rawText.contains("proxies:", true) || rawText.contains("- name:", true)) {
+            result.addAll(parseClashYamlToNodes(rawText))
+        }
+
+        return result
+    }
+
+    // ==================== 步骤 2：100 并发极速测速与暂停控制 ====================
 
     private fun actionStartSpeedTest() {
         if (rawNodes.isEmpty()) {
@@ -333,7 +387,7 @@ class MainActivity : Activity() {
             return
         }
 
-        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 10000) ?: 2000
+        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(300, 5000) ?: 1200
         val snapshot = rawNodes.toList()
         validNodes.clear()
         doneCount.set(0)
@@ -341,28 +395,28 @@ class MainActivity : Activity() {
         isPaused.set(false)
         pauseBtn.text = "暂停测速"
 
-        val cpuPool = Executors.newFixedThreadPool(64)
+        val cpuPool = Executors.newFixedThreadPool(100) // 提升并发至 100
         testThreadPool = cpuPool
 
         snapshot.forEach { node ->
             cpuPool.submit {
                 while (isPaused.get() && isTesting.get()) {
-                    try { Thread.sleep(200) } catch (_: Exception) {}
+                    try { Thread.sleep(150) } catch (_: Exception) {}
                 }
                 if (!isTesting.get()) return@submit
 
-                val target = parseNodeMeta(node)
-                if (target != null) {
-                    val latency = testConnectionStrict(target, timeout)
+                val hp = parseHostPort(node)
+                if (hp != null) {
+                    val latency = testSocketLatency(hp.first, hp.second, timeout)
                     if (latency > 0) {
                         validNodes.add(node to latency)
                     }
                 }
                 val d = doneCount.incrementAndGet()
-                if (d % 25 == 0 || d == snapshot.size) {
+                if (d % 50 == 0 || d == snapshot.size) {
                     runOnUiThread {
                         if (isTesting.get()) {
-                            status.text = "测速中: $d/${snapshot.size}，已验证可用: ${validNodes.size} 个"
+                            status.text = "测速中: $d/${snapshot.size}，验证存活: ${validNodes.size} 个"
                         }
                     }
                 }
@@ -377,8 +431,22 @@ class MainActivity : Activity() {
             runOnUiThread {
                 pauseBtn.text = "暂停测速"
                 updateStatusDisplay()
-                status.append("\n测速流程结束！共测出 ${validNodes.size} 个低延迟可用节点。")
+                status.append("\n测速流程结束！共测出 ${validNodes.size} 个可用节点。")
             }
+        }
+    }
+
+    private fun testSocketLatency(host: String, port: Int, timeout: Int): Long {
+        val start = System.currentTimeMillis()
+        return try {
+            Socket().use { socket ->
+                socket.tcpNoDelay = true
+                socket.soTimeout = timeout
+                socket.connect(InetSocketAddress(host, port), timeout)
+            }
+            System.currentTimeMillis() - start
+        } catch (_: Exception) {
+            -1L
         }
     }
 
@@ -391,7 +459,7 @@ class MainActivity : Activity() {
         } else {
             isPaused.set(true)
             pauseBtn.text = "恢复测速"
-            status.text = "测速已暂停！当前已保存 ${validNodes.size} 个有效节点，可直接排序或导出。"
+            status.text = "测速已暂停！当前已抓取保存 ${validNodes.size} 个可用节点，可直接点击【步骤 3】排序或导出！"
         }
     }
 
@@ -406,7 +474,7 @@ class MainActivity : Activity() {
 
     private fun actionSortNodes() {
         if (validNodes.isEmpty()) {
-            status.text = "提示：暂无可排序的有效节点（请先进行测速或在测速暂停后操作）"
+            status.text = "提示：暂无可排序的有效节点（请先进行测速或暂停测速后操作）"
             return
         }
         synchronized(validNodes) {
@@ -416,41 +484,9 @@ class MainActivity : Activity() {
         status.append("\n排序完成！已按延迟升序重排，最低延迟: ${validNodes.firstOrNull()?.second ?: 0}ms")
     }
 
-    // ==================== 严格连接探测 ====================
+    // ==================== 地址快速解析 ====================
 
-    private data class NodeMeta(val host: String, val port: Int, val isTls: Boolean, val sni: String)
-
-    private fun testConnectionStrict(meta: NodeMeta, timeout: Int): Long {
-        val start = System.currentTimeMillis()
-        return try {
-            if (meta.isTls) {
-                val socketFactory = SSLSocketFactory.getDefault()
-                val sslSocket = socketFactory.createSocket() as SSLSocket
-                sslSocket.soTimeout = timeout
-                if (meta.sni.isNotBlank()) {
-                    val sslParams = SSLParameters()
-                    sslParams.serverNames = listOf(SNIHostName(meta.sni))
-                    sslSocket.sslParameters = sslParams
-                }
-                sslSocket.connect(InetSocketAddress(meta.host, meta.port), timeout)
-                sslSocket.startHandshake()
-                val latency = System.currentTimeMillis() - start
-                sslSocket.close()
-                latency
-            } else {
-                Socket().use { socket ->
-                    socket.tcpNoDelay = true
-                    socket.soTimeout = timeout
-                    socket.connect(InetSocketAddress(meta.host, meta.port), timeout)
-                }
-                System.currentTimeMillis() - start
-            }
-        } catch (_: Exception) {
-            -1L
-        }
-    }
-
-    private fun parseNodeMeta(node: String): NodeMeta? {
+    private fun parseHostPort(node: String): Pair<String, Int>? {
         return try {
             val u = node.trim()
             when {
@@ -461,20 +497,7 @@ class MainActivity : Activity() {
                     val obj = JSONObject(decoded)
                     val host = obj.optString("add").ifBlank { return null }
                     val port = obj.optInt("port", 443)
-                    val tls = obj.optString("tls") == "tls"
-                    val sni = obj.optString("sni", host)
-                    NodeMeta(host, port, tls, sni)
-                }
-                u.startsWith("vless://", true) || u.startsWith("trojan://", true) -> {
-                    val raw = u.substringAfter("://").substringBefore("#")
-                    val serverPart = raw.substringBefore("?")
-                    val hp = if (serverPart.contains("@")) serverPart.substringAfter("@") else serverPart
-                    val host = hp.substringBefore(":")
-                    val port = hp.substringAfter(":", "443").toIntOrNull() ?: 443
-                    val query = parseQuery(raw.substringAfter("?", ""))
-                    val isTls = query["security"] == "tls" || query["security"] == "reality" || u.startsWith("trojan://", true)
-                    val sni = query["sni"] ?: query["peer"] ?: host
-                    NodeMeta(host, port, isTls, sni)
+                    host to port
                 }
                 u.startsWith("ss://", true) -> {
                     val body = u.substring(5).substringBefore("#")
@@ -486,104 +509,17 @@ class MainActivity : Activity() {
                     val hp = cleanHostPort.substringAfter("@", cleanHostPort)
                     val host = hp.substringBefore(":")
                     val port = hp.substringAfter(":").toIntOrNull() ?: 8388
-                    if (host.isNotBlank()) NodeMeta(host, port, false, "") else null
+                    if (host.isNotBlank()) host to port else null
                 }
                 else -> {
                     val raw = u.substringAfter("://").substringBefore("#").substringBefore("?")
                     val hostPort = if (raw.contains("@")) raw.substringAfter("@") else raw
                     val host = hostPort.substringBefore(":")
                     val port = hostPort.substringAfter(":", "443").toIntOrNull() ?: 443
-                    if (host.isNotBlank()) NodeMeta(host, port, false, "") else null
+                    if (host.isNotBlank()) host to port else null
                 }
             }
         } catch (_: Exception) { null }
-    }
-
-    // ==================== 极速下载与全量正则提取 ====================
-
-    private fun downloadWithTimeout(urlStr: String): String {
-        var result = ""
-        var currentTry = 0
-        while (currentTry < 2 && result.isEmpty()) {
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 8000
-                    readTimeout = 12000
-                    instanceFollowRedirects = true
-                    setRequestProperty("User-Agent", "ClashMeta/v1.18.0 (Android; arm64-v8a)")
-                    setRequestProperty("Accept", "*/*")
-                }
-                if (conn.responseCode in 200..299) {
-                    conn.inputStream.use { input ->
-                        BufferedReader(InputStreamReader(input, StandardCharsets.UTF_8)).use { reader ->
-                            val sb = StringBuilder()
-                            val buffer = CharArray(32768)
-                            var read: Int
-                            while (reader.read(buffer).also { read = it } != -1) {
-                                sb.append(buffer, 0, read)
-                            }
-                            result = sb.toString()
-                        }
-                    }
-                }
-            } catch (_: Exception) {
-                currentTry++
-            } finally {
-                conn?.disconnect()
-            }
-        }
-        return result
-    }
-
-    private fun extractNodesFull(rawText: String): List<String> {
-        val candidates = ArrayList<String>()
-        val prefixes = listOf("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "hysteria2://", "tuic://")
-        val uriRegex = Regex("(?:vmess|vless|trojan|ss|ssr|hy2|hysteria2|tuic)://[^\\s\"'<>]+", RegexOption.IGNORE_CASE)
-
-        uriRegex.findAll(rawText).forEach { match ->
-            candidates.add(match.value.trim().trimEnd(',', ';', ']', ')', '}', '\r', '\n'))
-        }
-
-        fun tryBase64Decode(s: String): String? {
-            val clean = s.replace(Regex("[^A-Za-z0-9+/=\\-_]"), "")
-            if (clean.length < 16) return null
-            val padLen = (4 - clean.length % 4) % 4
-            val padded = clean + "=".repeat(padLen)
-            return try {
-                val data = Base64.decode(padded, Base64.DEFAULT or Base64.NO_WRAP or Base64.URL_SAFE)
-                val decoded = String(data, StandardCharsets.UTF_8)
-                if (prefixes.any { decoded.contains(it, true) }) decoded else null
-            } catch (_: Exception) { null }
-        }
-
-        fun parseRecursive(text: String, depth: Int = 0) {
-            if (depth > 2 || text.isBlank()) return
-            text.lines().forEach { line ->
-                val l = line.trim()
-                if (l.length >= 16 && !l.contains("://")) {
-                    tryBase64Decode(l)?.let { decodedLine ->
-                        uriRegex.findAll(decodedLine).forEach { match ->
-                            candidates.add(match.value.trim())
-                        }
-                        parseRecursive(decodedLine, depth + 1)
-                    }
-                }
-            }
-            tryBase64Decode(text)?.let { decodedFull ->
-                uriRegex.findAll(decodedFull).forEach { match ->
-                    candidates.add(match.value.trim())
-                }
-                parseRecursive(decodedFull, depth + 1)
-            }
-            if (text.contains("proxies:", true) || text.contains("- name:", true)) {
-                candidates.addAll(parseClashYamlToNodes(text))
-            }
-        }
-
-        parseRecursive(rawText)
-        return candidates
     }
 
     private fun parseClashYamlToNodes(yamlText: String): List<String> {
@@ -707,10 +643,8 @@ class MainActivity : Activity() {
     private fun exportFile(clash: Boolean) {
         val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 1000
         val targetList: List<String> = if (validNodes.isNotEmpty()) {
-            // 已测速/已暂停：取前 N 个有效节点
             validNodes.map { it.first }.take(n)
         } else {
-            // 未测速：随机乱序后取前 N 个
             val shuffled = rawNodes.toMutableList()
             shuffled.shuffle()
             shuffled.take(n)
@@ -922,8 +856,7 @@ class MainActivity : Activity() {
             append("socks-port: 7891\n")
             append("allow-lan: false\n")
             append("mode: rule\n")
-            append("log-level: info\n")
-            append("external-controller: 127.0.0.1:9090\n\n")
+            append("log-level: info\n\n")
 
             append("proxies:\n")
             proxyYamlList.forEach { append(it).append("\n") }
@@ -938,7 +871,7 @@ class MainActivity : Activity() {
 
             append("  - name: AUTO\n")
             append("    type: url-test\n")
-            append("    url: https://aiplatform.googleapis.com/generate_204\n")
+            append("    url: https://www.google.com/generate_204\n")
             append("    interval: 300\n")
             append("    tolerance: 50\n")
             append("    proxies:\n")
