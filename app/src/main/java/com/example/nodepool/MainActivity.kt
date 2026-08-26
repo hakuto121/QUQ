@@ -22,6 +22,7 @@ class MainActivity : Activity() {
     private val scored = ArrayList<Pair<String, Long>>()
     
     private lateinit var sourceInput: EditText
+    private lateinit var customDomainInput: EditText // 用户专属 edgetunnel 域名输入框
     private lateinit var countInput: EditText
     private lateinit var timeoutInput: EditText
     private lateinit var status: TextView
@@ -29,6 +30,7 @@ class MainActivity : Activity() {
     private lateinit var modeRadioGroup: RadioGroup
     private lateinit var rbEdgeTunnel: RadioButton
     private lateinit var rbGeneral: RadioButton
+    private lateinit var edgeConfigLayout: LinearLayout
 
     private val cfFastIps = listOf(
         "104.16.160.1",
@@ -49,10 +51,6 @@ class MainActivity : Activity() {
         "https://raw.githubusercontent.com/ninjastrikers/Nexus-nodes/main/configs/all.txt"
     )
 
-    private val defaultsEdgeTunnel = listOf(
-        "https://930-8t1.pages.dev/sub?token=9aa544880a252ab191d97f7c67a7298b"
-    )
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         loadSources(isEdgeMode = true)
@@ -64,7 +62,9 @@ class MainActivity : Activity() {
         val saved = prefs.getStringSet(key, null)
         sources.clear()
         if (saved.isNullOrEmpty()) {
-            sources.addAll(if (isEdgeMode) defaultsEdgeTunnel else defaultsGeneral)
+            if (!isEdgeMode) {
+                sources.addAll(defaultsGeneral)
+            }
         } else {
             sources.addAll(saved)
         }
@@ -113,8 +113,44 @@ class MainActivity : Activity() {
         modeRadioGroup.addView(rbGeneral)
         root.addView(modeRadioGroup)
 
+        // edgetunnel 专用域名配置面板
+        edgeConfigLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, 12)
+        }
+        edgeConfigLayout.addView(TextView(this).apply {
+            text = "输入你的 edgetunnel 订阅链接或完整域名："
+            textSize = 13f
+        })
+        customDomainInput = EditText(this).apply {
+            hint = "例如: https://yourname.pages.dev/sub?token=xxx"
+            setText(prefs.getString("custom_edge_url", ""))
+            minLines = 1
+        }
+        edgeConfigLayout.addView(customDomainInput)
+        
+        val saveDomainBtn = Button(this).apply {
+            text = "保存我的 edgetunnel 域名"
+            textSize = 12f
+        }
+        saveDomainBtn.setOnClickListener {
+            val domainUrl = customDomainInput.text.toString().trim()
+            prefs.edit().putString("custom_edge_url", domainUrl).apply()
+            if (domainUrl.isNotBlank()) {
+                sources.add(domainUrl)
+                saveSources()
+                refreshSourceList()
+                status.text = "已绑定并保存你的专属 edgetunnel 域名！"
+            } else {
+                status.text = "请输入有效的 edgetunnel 链接"
+            }
+        }
+        edgeConfigLayout.addView(saveDomainBtn)
+        root.addView(edgeConfigLayout)
+
         modeRadioGroup.setOnCheckedChangeListener { _, checkedId ->
             val isEdge = checkedId == rbEdgeTunnel.id
+            edgeConfigLayout.visibility = if (isEdge) android.view.View.VISIBLE else android.view.View.GONE
             loadSources(isEdge)
             refreshSourceList()
             nodes.clear()
@@ -123,7 +159,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "输入订阅源地址（TXT / Base64 / GitHub Raw）："
+            text = "输入附加订阅源地址（TXT / Base64 / 备用源）："
             textSize = 13f
         })
 
@@ -268,12 +304,21 @@ class MainActivity : Activity() {
     }
 
     private fun updateAll() {
+        // 如果是 edgetunnel 模式，确保输入框里的自定义域名也加入源列表
+        if (rbEdgeTunnel.isChecked) {
+            val customUrl = customDomainInput.text.toString().trim()
+            if (customUrl.startsWith("http://") || customUrl.startsWith("https://")) {
+                sources.add(customUrl)
+                saveSources()
+            }
+        }
+
         if (sources.isEmpty()) {
-            status.text = "请先添加订阅源"
+            status.text = "请先添加或绑定你的 edgetunnel 域名/订阅源"
             return
         }
         val isEdge = rbEdgeTunnel.isChecked
-        status.text = if (isEdge) "正在拉取 edgetunnel 订阅并应用优选……" else "正在并发下载全网订阅源……"
+        status.text = if (isEdge) "正在拉取你自己的 edgetunnel 订阅并应用优选……" else "正在并发下载全网订阅源……"
         
         executor.execute {
             val result = LinkedHashSet<String>()
@@ -338,7 +383,7 @@ class MainActivity : Activity() {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 20000
         conn.readTimeout = 40000
-        conn.setRequestProperty("User-Agent", "NodePoolManager/2.0 Android")
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         conn.instanceFollowRedirects = true
         return conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
     }
@@ -404,14 +449,6 @@ class MainActivity : Activity() {
                             Socket().use { socket ->
                                 socket.connect(InetSocketAddress(hp.first, hp.second), timeout)
                             }
-                            
-                            if (isEdge) {
-                                val conn = URL("https://aiplatform.googleapis.com/generate_204").openConnection() as HttpURLConnection
-                                conn.connectTimeout = timeout
-                                conn.readTimeout = timeout
-                                conn.responseCode
-                            }
-
                             val latency = System.currentTimeMillis() - start
                             results.add(node to latency)
                         } catch (_: Exception) {}
@@ -551,12 +588,11 @@ class MainActivity : Activity() {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
                                 
-                                // 严苛校验 short-id (必须为 2~16 位的偶数位 Hex 字符串) 与 public-key
                                 if (isReality) {
-                                    val pbk = queryMap["pbk"]?.trim()
-                                    val sid = queryMap["sid"]?.trim()
-                                    val isHexSid = sid != null && sid.matches(Regex("^[0-9a-fA-F]{2,16}$")) && (sid.length % 2 == 0)
-                                    if (!pbk.isNullOrBlank() && isHexSid) {
+                                    val pbk = queryMap["pbk"]?.trim() ?: ""
+                                    val sid = queryMap["sid"]?.trim() ?: ""
+                                    val isHexSid = sid.matches(Regex("^[0-9a-fA-F]+$")) && (sid.length % 2 == 0) && (sid.length <= 16)
+                                    if (pbk.isNotBlank() && isHexSid) {
                                         sb.append("    reality-opts:\n")
                                         sb.append("      public-key: $pbk\n")
                                         sb.append("      short-id: $sid\n")
@@ -675,7 +711,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun cleanName(raw: String?, index: Int): String {
+    private fun cleanName(raw: String?, index: Int): string {
         val s = (raw ?: "").replace(Regex("[\\r\\n\\t\"]"), " ")
             .replace(Regex("[\\x00-\\x1F\\x7F]"), "")
             .replace(Regex("[:'#\\[\\]{}|>]"), " ")
