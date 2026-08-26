@@ -25,6 +25,7 @@ class MainActivity : Activity() {
     private lateinit var countInput: EditText
     private lateinit var timeoutInput: EditText
     private lateinit var status: TextView
+    private lateinit var logView: TextView // 实时运行日志窗口
     private lateinit var sourceContainer: LinearLayout
 
     private val defaultSources = listOf(
@@ -135,12 +136,30 @@ class MainActivity : Activity() {
 
         status = TextView(this).apply {
             textSize = 14f
-            setPadding(0, 18, 0, 0)
+            setPadding(0, 18, 0, 4)
         }
         root.addView(status)
 
+        // 实时运行日志显示面板
+        root.addView(TextView(this).apply {
+            text = "实时运行与错误日志："
+            textSize = 13f
+            setPadding(0, 12, 0, 4)
+        })
+
+        logView = TextView(this).apply {
+            textSize = 11f
+            setBackgroundColor(0xFF1E1E1E.toInt())
+            setTextColor(0xFF00FF00.toInt())
+            setPadding(16, 16, 16, 16)
+            minLines = 6
+            maxLines = 12
+            isVerticalScrollBarEnabled = true
+        }
+        root.addView(logView)
+
         setContentView(scroll)
-        status.text = "就绪：当前共有 ${sources.size} 个订阅源"
+        appendLog("就绪：当前共有 ${sources.size} 个订阅源")
 
         addBtn.setOnClickListener {
             val u = sourceInput.text.toString().trim()
@@ -149,9 +168,9 @@ class MainActivity : Activity() {
                 saveSources()
                 sourceInput.text.clear()
                 refreshSourceList()
-                status.text = "已添加，当前共 ${sources.size} 个订阅源"
+                appendLog("已添加订阅源: $u")
             } else {
-                status.text = "请输入 http:// 或 https:// 开头的有效链接"
+                appendLog("错误：请输入 http:// 或 https:// 开头的有效链接")
             }
         }
 
@@ -163,7 +182,7 @@ class MainActivity : Activity() {
                     sources.clear()
                     saveSources()
                     refreshSourceList()
-                    status.text = "已清空所有订阅源"
+                    appendLog("已清空所有订阅源")
                 }
                 .setNegativeButton("取消", null)
                 .show()
@@ -175,7 +194,21 @@ class MainActivity : Activity() {
         exportClash.setOnClickListener { exportFile(true) }
         clearBtn.setOnClickListener {
             nodes.clear(); scored.clear()
-            status.text = "已清空当前节点池"
+            appendLog("已清空当前节点池")
+        }
+    }
+
+    private fun appendLog(msg: String) {
+        runOnUiThread {
+            status.text = msg
+            val current = logView.text.toString()
+            val lines = current.lines()
+            val newText = if (lines.size > 50) {
+                lines.takeLast(40).joinToString("\n") + "\n" + msg
+            } else {
+                if (current.isBlank()) msg else "$current\n$msg"
+            }
+            logView.text = newText
         }
     }
 
@@ -207,7 +240,7 @@ class MainActivity : Activity() {
                     sources.remove(s)
                     saveSources()
                     refreshSourceList()
-                    status.text = "已删除 1 个源，剩余 ${sources.size} 个"
+                    appendLog("已删除源: $s")
                 }
             }
             row.addView(labelView)
@@ -218,33 +251,34 @@ class MainActivity : Activity() {
 
     private fun updateAll() {
         if (sources.isEmpty()) {
-            status.text = "请先添加订阅源"
+            appendLog("错误：请先添加订阅源")
             return
         }
-        status.text = "正在并发拉取全网所有格式订阅源……"
+        appendLog("开始并发拉取全网订阅源……")
 
         executor.execute {
             val result = LinkedHashSet<String>()
-            var ok = 0
+            var index = 0
             for (url in sources) {
+                index++
                 try {
+                    appendLog("[$index/${sources.size}] 正在下载: $url")
                     val content = download(url)
                     val extracted = extractNodes(content)
                     if (extracted.isNotEmpty()) {
-                        ok++
                         result.addAll(extracted)
+                        appendLog("[$index/${sources.size}] 成功解析出 ${extracted.size} 个节点")
+                    } else {
+                        appendLog("[$index/${sources.size}] 警告：该源未解析到有效代理节点")
                     }
-                } catch (_: Exception) {}
-                runOnUiThread {
-                    status.text = "拉取中：已处理 ${ok}/${sources.size} 个源，累计获取 ${result.size} 个独立节点"
+                } catch (e: Exception) {
+                    appendLog("[$index/${sources.size}] 异常跳过：${e.localizedMessage ?: e.toString()}")
                 }
             }
             nodes.clear()
             nodes.addAll(result)
             scored.clear()
-            runOnUiThread {
-                status.text = "更新完成：共获取并去重 ${nodes.size} 个标准代理节点"
-            }
+            appendLog("更新完成！去重后共获得 ${nodes.size} 个标准代理节点")
         }
     }
 
@@ -257,7 +291,6 @@ class MainActivity : Activity() {
         return conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
     }
 
-    // 全格式解析引擎：原生 URI、整段/按行 Base64、Clash YAML 配置文件
     private fun extractNodes(rawText: String): List<String> {
         val candidates = LinkedHashSet<String>()
         val regex = Regex("(?i)(?:vmess|vless|trojan|ss|ssr|hysteria2|hysteria|hy2|tuic)://[^\\s\"'<>]+")
@@ -276,13 +309,9 @@ class MainActivity : Activity() {
             } catch (_: Exception) { null }
         }
 
-        // 1. 直接正则扫描
         scanText(rawText)
-
-        // 2. 整段 Base64 尝试解码
         tryBase64Decode(rawText)?.let { scanText(it) }
 
-        // 3. 逐行 Base64 解码扫描
         rawText.lineSequence().forEach { line ->
             val l = line.trim()
             if (l.length >= 16 && !l.contains("://")) {
@@ -290,7 +319,6 @@ class MainActivity : Activity() {
             }
         }
 
-        // 4. 解析 Clash YAML 格式订阅源
         if (rawText.contains("proxies:", ignoreCase = true) || rawText.contains("- name:", ignoreCase = true)) {
             val yamlNodes = parseClashYamlToNodes(rawText)
             candidates.addAll(yamlNodes)
@@ -299,7 +327,6 @@ class MainActivity : Activity() {
         return candidates.toList()
     }
 
-    // 将 YAML 格式的节点还原转换成标准的代理 URI
     private fun parseClashYamlToNodes(yamlText: String): List<String> {
         val list = ArrayList<String>()
         val lines = yamlText.lines()
@@ -307,61 +334,63 @@ class MainActivity : Activity() {
 
         fun flushCurrent() {
             currentMap?.let { map ->
-                val type = map["type"]?.lowercase() ?: ""
-                val server = map["server"] ?: ""
-                val port = map["port"] ?: "443"
-                val name = map["name"] ?: "ClashNode"
-                val encodedName = URLEncoder.encode(name, "UTF-8")
+                try {
+                    val type = map["type"]?.lowercase() ?: ""
+                    val server = map["server"] ?: ""
+                    val port = map["port"] ?: "443"
+                    val name = map["name"] ?: "ClashNode"
+                    val encodedName = URLEncoder.encode(name, "UTF-8")
 
-                when (type) {
-                    "vmess" -> {
-                        val uuid = map["uuid"] ?: ""
-                        if (server.isNotBlank() && uuid.isNotBlank()) {
-                            val obj = JSONObject().apply {
-                                put("v", "2")
-                                put("ps", name)
-                                put("add", server)
-                                put("port", port)
-                                put("id", uuid)
-                                put("aid", map["alterId"] ?: "0")
-                                put("scy", map["cipher"]?.takeIf { it != "null" && it.isNotBlank() } ?: "auto")
-                                put("net", map["network"] ?: "tcp")
-                                put("tls", if (map["tls"] == "true") "tls" else "")
-                                put("sni", map["servername"] ?: map["sni"] ?: "")
-                                put("host", map["host"] ?: "")
-                                put("path", map["path"] ?: "")
+                    when (type) {
+                        "vmess" -> {
+                            val uuid = map["uuid"] ?: ""
+                            if (server.isNotBlank() && uuid.isNotBlank()) {
+                                val obj = JSONObject().apply {
+                                    put("v", "2")
+                                    put("ps", name)
+                                    put("add", server)
+                                    put("port", port)
+                                    put("id", uuid)
+                                    put("aid", map["alterId"] ?: "0")
+                                    put("scy", map["cipher"]?.takeIf { it != "null" && it.isNotBlank() } ?: "auto")
+                                    put("net", map["network"] ?: "tcp")
+                                    put("tls", if (map["tls"] == "true") "tls" else "")
+                                    put("sni", map["servername"] ?: map["sni"] ?: "")
+                                    put("host", map["host"] ?: "")
+                                    put("path", map["path"] ?: "")
+                                }
+                                val b64 = Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                                list.add("vmess://$b64")
                             }
-                            val b64 = Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                            list.add("vmess://$b64")
+                        }
+                        "vless" -> {
+                            val uuid = map["uuid"] ?: ""
+                            if (server.isNotBlank() && uuid.isNotBlank()) {
+                                val tls = if (map["tls"] == "true") "tls" else "none"
+                                val net = map["network"] ?: "tcp"
+                                val sni = map["servername"] ?: map["sni"] ?: ""
+                                val uri = "vless://$uuid@$server:$port?security=$tls&type=$net&sni=$sni#$encodedName"
+                                list.add(uri)
+                            }
+                        }
+                        "trojan" -> {
+                            val password = map["password"] ?: ""
+                            if (server.isNotBlank() && password.isNotBlank()) {
+                                val sni = map["sni"] ?: map["servername"] ?: ""
+                                val uri = "trojan://$password@$server:$port?sni=$sni#$encodedName"
+                                list.add(uri)
+                            }
+                        }
+                        "ss" -> {
+                            val cipher = map["cipher"]?.takeIf { it != "null" && it.isNotBlank() } ?: ""
+                            val password = map["password"] ?: ""
+                            if (server.isNotBlank() && cipher.isNotBlank() && password.isNotBlank()) {
+                                val userPart = Base64.encodeToString("$cipher:$password".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                                list.add("ss://$userPart@$server:$port#$encodedName")
+                            }
                         }
                     }
-                    "vless" -> {
-                        val uuid = map["uuid"] ?: ""
-                        if (server.isNotBlank() && uuid.isNotBlank()) {
-                            val tls = if (map["tls"] == "true") "tls" else "none"
-                            val net = map["network"] ?: "tcp"
-                            val sni = map["servername"] ?: map["sni"] ?: ""
-                            val uri = "vless://$uuid@$server:$port?security=$tls&type=$net&sni=$sni#$encodedName"
-                            list.add(uri)
-                        }
-                    }
-                    "trojan" -> {
-                        val password = map["password"] ?: ""
-                        if (server.isNotBlank() && password.isNotBlank()) {
-                            val sni = map["sni"] ?: map["servername"] ?: ""
-                            val uri = "trojan://$password@$server:$port?sni=$sni#$encodedName"
-                            list.add(uri)
-                        }
-                    }
-                    "ss" -> {
-                        val cipher = map["cipher"]?.takeIf { it != "null" && it.isNotBlank() } ?: ""
-                        val password = map["password"] ?: ""
-                        if (server.isNotBlank() && cipher.isNotBlank() && password.isNotBlank()) {
-                            val userPart = Base64.encodeToString("$cipher:$password".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                            list.add("ss://$userPart@$server:$port#$encodedName")
-                        }
-                    }
-                }
+                } catch (_: Exception) {}
             }
             currentMap = null
         }
@@ -371,7 +400,6 @@ class MainActivity : Activity() {
             if (line.startsWith("- name:") || line.startsWith("- {name:")) {
                 flushCurrent()
                 currentMap = HashMap()
-                // 兼容内联 JSON 风格: - {name: "xx", server: xx, port: xx}
                 if (line.contains("{") && line.contains("}")) {
                     val content = line.substringAfter("{").substringBeforeLast("}")
                     content.split(",").forEach { pair ->
@@ -402,12 +430,12 @@ class MainActivity : Activity() {
 
     private fun speedTest() {
         if (nodes.isEmpty()) {
-            status.text = "请先点击“拉取并更新全部订阅”"
+            appendLog("提示：请先点击“拉取并更新全部订阅”")
             return
         }
         val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2500
         val snapshot = nodes.toList()
-        status.text = "正在进行多线程延迟测速与排序：0/${snapshot.size}"
+        appendLog("开始多线程测速，共 ${snapshot.size} 个节点……")
 
         executor.execute {
             val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
@@ -428,8 +456,8 @@ class MainActivity : Activity() {
                         } catch (_: Exception) {}
                     }
                     val d = done.incrementAndGet()
-                    if (d % 10 == 0 || d == snapshot.size) {
-                        runOnUiThread { status.text = "测速中：$d/${snapshot.size}，可用节点 ${results.size}" }
+                    if (d % 20 == 0 || d == snapshot.size) {
+                        appendLog("测速进度：$d/${snapshot.size} (可用: ${results.size})")
                     }
                 }
             }
@@ -438,9 +466,7 @@ class MainActivity : Activity() {
             results.sortBy { it.second }
             scored.clear(); scored.addAll(results)
             nodes.clear(); nodes.addAll(results.map { it.first })
-            runOnUiThread {
-                status.text = "测速完成：精选出 ${results.size} 个优质可用节点（已按延迟升序排序）"
-            }
+            appendLog("测速完成！筛选出 ${results.size} 个可用节点（已按延迟排序）")
         }
     }
 
@@ -465,7 +491,7 @@ class MainActivity : Activity() {
 
     private fun exportFile(clash: Boolean) {
         if (nodes.isEmpty()) {
-            status.text = "没有可导出的节点，请先更新并测速"
+            appendLog("提示：没有可导出的节点")
             return
         }
         val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 100
@@ -508,7 +534,6 @@ class MainActivity : Activity() {
                         val uuid = obj.optString("id")
                         val alterId = obj.optInt("aid", 0)
                         
-                        // 根除 cipher: null 报错：强制非空，杜绝 null 字符串
                         var cipher = obj.optString("scy", "auto")
                         if (cipher.isBlank() || cipher.equals("null", ignoreCase = true)) {
                             cipher = "auto"
@@ -571,11 +596,11 @@ class MainActivity : Activity() {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
 
-                                // 严苛校验 short-id (偶数位合法 Hex 字符串)，彻底根绝 invalid REALITY short ID
+                                // 严苛防御：只有当 sid 完全合规时才写入 reality-opts，否则强制转为标准 TLS，彻底消灭 invalid REALITY short ID
                                 if (isReality) {
                                     val pbk = queryMap["pbk"]?.trim() ?: ""
                                     val sid = queryMap["sid"]?.trim() ?: ""
-                                    val isHexSid = sid.matches(Regex("^[0-9a-fA-F]+$")) && (sid.length % 2 == 0) && (sid.length <= 16)
+                                    val isHexSid = sid.matches(Regex("^[0-9a-fA-F]+$")) && (sid.length % 2 == 0) && (sid.length in 2..16)
                                     if (pbk.isNotBlank() && isHexSid) {
                                         sb.append("    reality-opts:\n")
                                         sb.append("      public-key: $pbk\n")
@@ -730,9 +755,9 @@ class MainActivity : Activity() {
                 contentResolver.openOutputStream(data.data!!).use { out ->
                     out?.write((pendingExport ?: "").toByteArray(Charsets.UTF_8))
                 }
-                status.text = "导出成功"
+                appendLog("导出成功！")
             } catch (e: Exception) {
-                status.text = "导出失败：${e.message}"
+                appendLog("导出失败：${e.message}")
             }
         }
     }
