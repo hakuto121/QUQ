@@ -30,7 +30,6 @@ class MainActivity : Activity() {
     private lateinit var rbEdgeTunnel: RadioButton
     private lateinit var rbGeneral: RadioButton
 
-    // 内置国内优质 Anycast / CDN 优选地址
     private val cfFastIps = listOf(
         "104.16.160.1",
         "104.17.160.1",
@@ -51,7 +50,7 @@ class MainActivity : Activity() {
     )
 
     private val defaultsEdgeTunnel = listOf(
-        "https://bestcf.pages.dev/vps789/top100.txt"
+        "https://930-8t1.pages.dev/sub?token=9aa544880a252ab191d97f7c67a7298b"
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,12 +85,11 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "节点池管理器 (Edge & 通用双模版)"
-            textSize = 24f
+            text = "征兵处"
+            textSize = 26f
             setPadding(0, 0, 0, 16)
         })
 
-        // 模式选择单选组
         root.addView(TextView(this).apply {
             text = "选择工作模式："
             textSize = 14f
@@ -104,7 +102,7 @@ class MainActivity : Activity() {
         }
 
         rbEdgeTunnel = RadioButton(this).apply {
-            text = "edgetunnel / 优选裸连模式"
+            text = "edgetunnel 裸连模式"
             isChecked = true
         }
         rbGeneral = RadioButton(this).apply {
@@ -121,11 +119,11 @@ class MainActivity : Activity() {
             refreshSourceList()
             nodes.clear()
             scored.clear()
-            status.text = if (isEdge) "已切换至【edgetunnel / 优选裸连模式】，支持国内免 VPN 访问" else "已切换至【全网聚合订阅模式】"
+            status.text = if (isEdge) "已切换至【edgetunnel 裸连模式】" else "已切换至【全网聚合订阅模式】"
         }
 
         root.addView(TextView(this).apply {
-            text = "输入订阅源地址（TXT / 优选直链 / GitHub Raw）："
+            text = "输入订阅源地址（TXT / Base64 / GitHub Raw）："
             textSize = 13f
         })
 
@@ -177,10 +175,10 @@ class MainActivity : Activity() {
         }
         root.addView(countInput)
 
-        val exportTxt = Button(this).apply { text = "③ 导出 TXT (支持 Vertex 控制台)" }
+        val exportTxt = Button(this).apply { text = "③ 导出 TXT" }
         root.addView(exportTxt)
 
-        val exportClash = Button(this).apply { text = "④ 导出 CLASH YAML (防报错合规)" }
+        val exportClash = Button(this).apply { text = "④ 导出 CLASH YAML" }
         root.addView(exportClash)
 
         val clearBtn = Button(this).apply { text = "清空当前已测节点" }
@@ -275,7 +273,7 @@ class MainActivity : Activity() {
             return
         }
         val isEdge = rbEdgeTunnel.isChecked
-        status.text = if (isEdge) "正在拉取并构建 edgetunnel 优选节点……" else "正在下载全网订阅并去重……"
+        status.text = if (isEdge) "正在拉取 edgetunnel 订阅并应用优选……" else "正在并发下载全网订阅源……"
         
         executor.execute {
             val result = LinkedHashSet<String>()
@@ -288,7 +286,6 @@ class MainActivity : Activity() {
                     
                     extracted.forEach { raw ->
                         if (isEdge) {
-                            // edgetunnel 模式：强制替换并确保优选 CDN 第一跳
                             result.add(speedUpNode(raw))
                         } else {
                             result.add(raw)
@@ -339,8 +336,8 @@ class MainActivity : Activity() {
 
     private fun download(url: String): String {
         val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 15000
-        conn.readTimeout = 30000
+        conn.connectTimeout = 20000
+        conn.readTimeout = 40000
         conn.setRequestProperty("User-Agent", "NodePoolManager/2.0 Android")
         conn.instanceFollowRedirects = true
         return conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
@@ -391,7 +388,7 @@ class MainActivity : Activity() {
         val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2500
         val isEdge = rbEdgeTunnel.isChecked
         val snapshot = nodes.toList()
-        status.text = if (isEdge) "正在执行国内直连测速与 Google 端点测试：0/${snapshot.size}" else "正在进行多线程极速测速：0/${snapshot.size}"
+        status.text = if (isEdge) "正在执行国内裸连深度测速：0/${snapshot.size}" else "正在进行多线程快速测速：0/${snapshot.size}"
 
         executor.execute {
             val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
@@ -408,7 +405,6 @@ class MainActivity : Activity() {
                                 socket.connect(InetSocketAddress(hp.first, hp.second), timeout)
                             }
                             
-                            // 针对裸连模式补充轻量请求校验
                             if (isEdge) {
                                 val conn = URL("https://aiplatform.googleapis.com/generate_204").openConnection() as HttpURLConnection
                                 conn.connectTimeout = timeout
@@ -432,7 +428,7 @@ class MainActivity : Activity() {
             scored.clear(); scored.addAll(results)
             nodes.clear(); nodes.addAll(results.map { it.first })
             runOnUiThread {
-                status.text = "测速完成：精选出 ${results.size} 个高可用节点（已按延迟排好序）"
+                status.text = "测速完成：精选出 ${results.size} 个有效节点（已按延迟排好序）"
             }
         }
     }
@@ -536,7 +532,8 @@ class MainActivity : Activity() {
                         val queryMap = parseQuery(uri.rawQuery ?: "")
                         val rawRemark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "VLESS"
                         val name = cleanName(rawRemark, idx)
-                        val tls = queryMap["security"] == "tls" || queryMap["security"] == "reality"
+                        val isReality = queryMap["security"] == "reality"
+                        val tls = queryMap["security"] == "tls" || isReality
                         val flow = queryMap["flow"] ?: ""
                         val sni = queryMap["sni"] ?: ""
                         val net = queryMap["type"] ?: "tcp"
@@ -553,11 +550,13 @@ class MainActivity : Activity() {
                             if (tls) {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
-                                if (queryMap["security"] == "reality") {
-                                    val pbk = queryMap["pbk"]
-                                    val sid = queryMap["sid"]
-                                    // 严格拦截残缺 Reality，防止 invalid short ID 崩溃
-                                    if (!pbk.isNullOrBlank() && !sid.isNullOrBlank()) {
+                                
+                                // 严苛校验 short-id (必须为 2~16 位的偶数位 Hex 字符串) 与 public-key
+                                if (isReality) {
+                                    val pbk = queryMap["pbk"]?.trim()
+                                    val sid = queryMap["sid"]?.trim()
+                                    val isHexSid = sid != null && sid.matches(Regex("^[0-9a-fA-F]{2,16}$")) && (sid.length % 2 == 0)
+                                    if (!pbk.isNullOrBlank() && isHexSid) {
                                         sb.append("    reality-opts:\n")
                                         sb.append("      public-key: $pbk\n")
                                         sb.append("      short-id: $sid\n")
@@ -627,7 +626,6 @@ class MainActivity : Activity() {
                         val cipher = userInfo.substringBefore(":", "").trim()
                         val password = userInfo.substringAfter(":", "").trim()
 
-                        // 关键拦截：必须确保 cipher 和 password 非空，彻底根治 key 'cipher' missing 报错
                         if (server.isNotBlank() && cipher.isNotBlank() && password.isNotBlank()) {
                             val sb = StringBuilder()
                             sb.append("  - name: \"$name\"\n")
