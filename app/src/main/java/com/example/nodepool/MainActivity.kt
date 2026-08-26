@@ -66,7 +66,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "征兵处 - Vertex 淘金版"
+            text = "征兵处 - 节点池管理器"
             textSize = 22f
             setPadding(0, 0, 0, 16)
         })
@@ -105,7 +105,6 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        // 按钮精简美观：只保留核心简述功能
         val updateBtn = Button(this).apply { text = "提取节点" }
         root.addView(updateBtn)
 
@@ -114,14 +113,14 @@ class MainActivity : Activity() {
 
         timeoutInput = EditText(this).apply {
             hint = "测速超时（毫秒）"
-            setText("2500")
+            setText("2000")
             inputType = 2
         }
         root.addView(timeoutInput)
 
         countInput = EditText(this).apply {
-            hint = "导出前 N 个高通过率节点"
-            setText("100")
+            hint = "导出节点数量"
+            setText("200")
             inputType = 2
         }
         root.addView(countInput)
@@ -142,7 +141,7 @@ class MainActivity : Activity() {
         root.addView(status)
 
         setContentView(scroll)
-        status.text = "就绪：已加载 ${sources.size} 个内置优质订阅源"
+        status.text = "就绪：已加载 ${sources.size} 个内置订阅源"
 
         addBtn.setOnClickListener {
             val u = sourceInput.text.toString().trim()
@@ -219,13 +218,12 @@ class MainActivity : Activity() {
         }
     }
 
-    // 海量高并发全格式提取引擎
     private fun updateAllAsync() {
         if (sources.isEmpty()) {
             status.text = "请先添加订阅源"
             return
         }
-        status.text = "正在全速海量提取节点中……"
+        status.text = "正在全量并发提取节点中……"
 
         val pool = Executors.newFixedThreadPool(sources.size.coerceIn(1, 24))
         val collectedNodes = java.util.Collections.synchronizedList(ArrayList<String>())
@@ -236,12 +234,12 @@ class MainActivity : Activity() {
             pool.submit {
                 try {
                     val content = downloadWithTimeout(url)
-                    val extracted = extractNodes(content)
+                    val extracted = extractNodesFull(content)
                     if (extracted.isNotEmpty()) {
                         collectedNodes.addAll(extracted)
                     }
                 } catch (_: Exception) {}
-                
+
                 val current = completedCount.incrementAndGet()
                 runOnUiThread {
                     status.text = "提取进度: $current/$total 源，已捕获 ${collectedNodes.size} 个节点"
@@ -253,7 +251,7 @@ class MainActivity : Activity() {
 
         Executors.newSingleThreadExecutor().execute {
             try {
-                pool.awaitTermination(45, TimeUnit.SECONDS)
+                pool.awaitTermination(60, TimeUnit.SECONDS)
             } catch (_: Exception) {}
 
             val distinctList = collectedNodes.distinct()
@@ -262,7 +260,7 @@ class MainActivity : Activity() {
             scored.clear()
 
             runOnUiThread {
-                status.text = "提取完成！共获取 ${nodes.size} 个高纯度代理节点"
+                status.text = "提取完成！共捕获 ${nodes.size} 个代理节点"
             }
         }
     }
@@ -270,15 +268,15 @@ class MainActivity : Activity() {
     private fun downloadWithTimeout(urlStr: String): String {
         val url = URL(urlStr)
         val conn = url.openConnection() as HttpURLConnection
-        conn.connectTimeout = 15000
-        conn.readTimeout = 25000
+        conn.connectTimeout = 20000
+        conn.readTimeout = 40000
         conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         conn.instanceFollowRedirects = true
-        
+
         return conn.inputStream.use { input ->
             BufferedReader(InputStreamReader(input, Charsets.UTF_8)).use { reader ->
                 val sb = StringBuilder()
-                val buffer = CharArray(16384)
+                val buffer = CharArray(32768)
                 var charsRead: Int
                 while (reader.read(buffer).also { charsRead = it } != -1) {
                     sb.append(buffer, 0, charsRead)
@@ -288,7 +286,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun extractNodes(rawText: String): List<String> {
+    // 全量无截断节点扫描器
+    private fun extractNodesFull(rawText: String): List<String> {
         val candidates = ArrayList<String>()
         val regex = Regex("(?i)(?:vmess|vless|trojan|ss|ssr|hysteria2|hysteria|hy2|tuic)://[^\\s\"'<>]+")
 
@@ -311,18 +310,25 @@ class MainActivity : Activity() {
             } catch (_: Exception) { null }
         }
 
+        // 1. 全文直接扫描
         scan(rawText)
+
+        // 2. 整段 Base64 尝试
         decodeSafe(rawText)?.let { scan(it) }
 
+        // 3. 逐行深度扫描（针对多行 base64 混合源）
         rawText.lineSequence().forEach { line ->
             val l = line.trim()
-            if (l.length >= 16 && !l.contains("://")) {
-                decodeSafe(l)?.let { decoded ->
-                    scan(decoded)
+            if (l.length >= 16) {
+                if (l.contains("://")) {
+                    scan(l)
+                } else {
+                    decodeSafe(l)?.let { scan(it) }
                 }
             }
         }
 
+        // 4. 解析 YAML 配置文件
         if (rawText.contains("proxies:", ignoreCase = true) || rawText.contains("- name:", ignoreCase = true)) {
             val yamlNodes = parseClashYamlToNodes(rawText)
             candidates.addAll(yamlNodes)
@@ -432,15 +438,14 @@ class MainActivity : Activity() {
         return list
     }
 
-    // Vertex 专属高通过率智能测速：多线程真实业务连通性验证
     private fun speedTest() {
         if (nodes.isEmpty()) {
             status.text = "提示：请先点击“提取节点”"
             return
         }
-        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 10000) ?: 2500
+        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 10000) ?: 2000
         val snapshot = nodes.toList()
-        status.text = "正在执行 Vertex 专属真连接测速：0/${snapshot.size}"
+        status.text = "正在执行快速测速：0/${snapshot.size}"
 
         val cpuPool = Executors.newFixedThreadPool(48)
         val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
@@ -463,7 +468,7 @@ class MainActivity : Activity() {
                 val d = done.incrementAndGet()
                 if (d % 100 == 0 || d == snapshot.size) {
                     runOnUiThread {
-                        status.text = "测速中: $d/${snapshot.size}，高通过率可用节点: ${results.size}"
+                        status.text = "测速中: $d/${snapshot.size}，可用节点: ${results.size}"
                     }
                 }
             }
@@ -474,7 +479,7 @@ class MainActivity : Activity() {
             try {
                 cpuPool.awaitTermination(90, TimeUnit.SECONDS)
             } catch (_: Exception) {}
-            
+
             results.sortBy { it.second }
             scored.clear()
             scored.addAll(results)
@@ -482,7 +487,7 @@ class MainActivity : Activity() {
             nodes.addAll(results.map { it.first })
 
             runOnUiThread {
-                status.text = "测速完成！精选出 ${results.size} 个高通过率优质节点"
+                status.text = "测速完成！精选出 ${results.size} 个可用节点（已按延迟排序）"
             }
         }
     }
@@ -511,7 +516,7 @@ class MainActivity : Activity() {
             status.text = "提示：没有可导出的节点"
             return
         }
-        val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 100
+        val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 200
         val selected = nodes.take(n)
 
         val body = if (!clash) {
@@ -550,7 +555,7 @@ class MainActivity : Activity() {
                         val port = obj.optInt("port", 443)
                         val uuid = obj.optString("id")
                         val alterId = obj.optInt("aid", 0)
-                        
+
                         var cipher = obj.optString("scy", "auto")
                         if (cipher.isBlank() || cipher.equals("null", ignoreCase = true)) {
                             cipher = "auto"
@@ -608,7 +613,7 @@ class MainActivity : Activity() {
                             sb.append("    uuid: $uuid\n")
                             sb.append("    udp: true\n")
                             if (flow.isNotBlank()) sb.append("    flow: $flow\n")
-                            
+
                             if (isReality || queryMap["security"] == "tls") {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
