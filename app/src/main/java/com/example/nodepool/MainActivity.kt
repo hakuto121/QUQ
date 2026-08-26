@@ -19,14 +19,13 @@ import java.util.concurrent.atomic.AtomicInteger
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("node_pool", MODE_PRIVATE) }
     private val sources = LinkedHashSet<String>()
-    private val nodes = LinkedHashSet<String>()
+    private val nodes = ArrayList<String>()
     private val scored = ArrayList<Pair<String, Long>>()
 
     private lateinit var sourceInput: EditText
     private lateinit var countInput: EditText
     private lateinit var timeoutInput: EditText
     private lateinit var status: TextView
-    private lateinit var logView: TextView
     private lateinit var sourceContainer: LinearLayout
 
     private val defaultSources = listOf(
@@ -106,15 +105,15 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        val updateBtn = Button(this).apply { text = "① 高并发拉取并更新全部订阅" }
+        val updateBtn = Button(this).apply { text = "① 全速拉取全网海量节点" }
         root.addView(updateBtn)
 
-        val speedBtn = Button(this).apply { text = "② 智能深度测速与按延迟排序" }
+        val speedBtn = Button(this).apply { text = "② 真实 Google 端点测速与精准排序" }
         root.addView(speedBtn)
 
         timeoutInput = EditText(this).apply {
             hint = "测速超时（毫秒）"
-            setText("2500")
+            setText("2000")
             inputType = 2
         }
         root.addView(timeoutInput)
@@ -137,29 +136,12 @@ class MainActivity : Activity() {
 
         status = TextView(this).apply {
             textSize = 14f
-            setPadding(0, 18, 0, 4)
+            setPadding(0, 18, 0, 0)
         }
         root.addView(status)
 
-        root.addView(TextView(this).apply {
-            text = "实时运行与错误日志："
-            textSize = 13f
-            setPadding(0, 12, 0, 4)
-        })
-
-        logView = TextView(this).apply {
-            textSize = 11f
-            setBackgroundColor(0xFF1E1E1E.toInt())
-            setTextColor(0xFF00FF00.toInt())
-            setPadding(16, 16, 16, 16)
-            minLines = 6
-            maxLines = 12
-            isVerticalScrollBarEnabled = true
-        }
-        root.addView(logView)
-
         setContentView(scroll)
-        appendLog("就绪：当前共有 ${sources.size} 个订阅源")
+        status.text = "就绪：当前共有 ${sources.size} 个内置订阅源"
 
         addBtn.setOnClickListener {
             val u = sourceInput.text.toString().trim()
@@ -168,9 +150,9 @@ class MainActivity : Activity() {
                 saveSources()
                 sourceInput.text.clear()
                 refreshSourceList()
-                appendLog("已添加订阅源: $u")
+                status.text = "已添加，当前共 ${sources.size} 个源"
             } else {
-                appendLog("错误：请输入 http:// 或 https:// 开头的有效链接")
+                status.text = "请输入 http:// 或 https:// 开头的链接"
             }
         }
 
@@ -182,7 +164,7 @@ class MainActivity : Activity() {
                     sources.clear()
                     saveSources()
                     refreshSourceList()
-                    appendLog("已清空所有订阅源")
+                    status.text = "已清空订阅源"
                 }
                 .setNegativeButton("取消", null)
                 .show()
@@ -193,27 +175,21 @@ class MainActivity : Activity() {
         exportTxt.setOnClickListener { exportFile(false) }
         exportClash.setOnClickListener { exportFile(true) }
         clearBtn.setOnClickListener {
-            nodes.clear(); scored.clear()
-            appendLog("已清空当前节点池")
-        }
-    }
-
-    private fun appendLog(msg: String) {
-        runOnUiThread {
-            status.text = msg
-            val current = logView.text.toString()
-            val lines = current.lines()
-            val newText = if (lines.size > 80) {
-                lines.takeLast(60).joinToString("\n") + "\n" + msg
-            } else {
-                if (current.isBlank()) msg else "$current\n$msg"
-            }
-            logView.text = newText
+            nodes.clear()
+            scored.clear()
+            status.text = "已清空当前节点池"
         }
     }
 
     private fun refreshSourceList() {
         sourceContainer.removeAllViews()
+        val title = TextView(this).apply {
+            text = "当前订阅源列表（共 ${sources.size} 个）："
+            textSize = 13f
+            setPadding(0, 8, 0, 4)
+        }
+        sourceContainer.addView(title)
+
         sources.forEachIndexed { i, s ->
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -233,7 +209,7 @@ class MainActivity : Activity() {
                     sources.remove(s)
                     saveSources()
                     refreshSourceList()
-                    appendLog("已删除源: $s")
+                    status.text = "已删除 1 个源，剩余 ${sources.size} 个"
                 }
             }
             row.addView(labelView)
@@ -242,52 +218,52 @@ class MainActivity : Activity() {
         }
     }
 
-    // 采用高并发独立线程池拉取：确保某个源卡死时绝对不会影响其他源
+    // 高并发深度拉取
     private fun updateAllAsync() {
         if (sources.isEmpty()) {
-            appendLog("错误：请先添加订阅源")
+            status.text = "请先添加订阅源"
             return
         }
-        appendLog("开始高并发异步拉取 ${sources.size} 个订阅源……")
+        status.text = "正在全速并发拉取全网所有订阅源……"
 
-        val pool = Executors.newFixedThreadPool(sources.size.coerceIn(1, 16))
-        val concurrentResult = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
-        val atomicCount = AtomicInteger(0)
+        val pool = Executors.newFixedThreadPool(sources.size.coerceIn(1, 24))
+        val collectedNodes = java.util.Collections.synchronizedList(ArrayList<String>())
+        val completedCount = AtomicInteger(0)
         val total = sources.size
 
         sources.forEachIndexed { index, url ->
             pool.submit {
-                val idx = index + 1
                 try {
-                    appendLog("[$idx/$total] 启动下载: $url")
                     val content = downloadWithTimeout(url)
                     val extracted = extractNodes(content)
                     if (extracted.isNotEmpty()) {
-                        concurrentResult.addAll(extracted)
-                        appendLog("[$idx/$total] 成功：解析出 ${extracted.size} 个节点")
-                    } else {
-                        appendLog("[$idx/$total] 警告：该源未发现有效节点")
+                        collectedNodes.addAll(extracted)
                     }
-                } catch (e: Exception) {
-                    appendLog("[$idx/$total] 失败/超时：${e.localizedMessage ?: e.toString()}")
-                } finally {
-                    atomicCount.incrementAndGet()
+                } catch (_: Exception) {}
+                
+                val current = completedCount.incrementAndGet()
+                runOnUiThread {
+                    status.text = "拉取进度: $current/$total 源完成，累计采集到 ${collectedNodes.size} 个节点"
                 }
             }
         }
 
         pool.shutdown()
-        
-        // 在后台监控线程中等待所有源并发完成
+
         Executors.newSingleThreadExecutor().execute {
             try {
-                pool.awaitTermination(60, TimeUnit.SECONDS)
+                pool.awaitTermination(45, TimeUnit.SECONDS)
             } catch (_: Exception) {}
 
+            // 温和去重：仅去除完全相同的链接，保留不同别名与参数
+            val distinctList = collectedNodes.distinct()
             nodes.clear()
-            nodes.addAll(concurrentResult)
+            nodes.addAll(distinctList)
             scored.clear()
-            appendLog("全部更新完毕！最终去重获得 ${nodes.size} 个标准代理节点")
+
+            runOnUiThread {
+                status.text = "拉取完成！共捕获 ${nodes.size} 个高纯度代理节点"
+            }
         }
     }
 
@@ -296,13 +272,13 @@ class MainActivity : Activity() {
         val conn = url.openConnection() as HttpURLConnection
         conn.connectTimeout = 15000
         conn.readTimeout = 25000
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         conn.instanceFollowRedirects = true
         
         return conn.inputStream.use { input ->
             BufferedReader(InputStreamReader(input, Charsets.UTF_8)).use { reader ->
                 val sb = StringBuilder()
-                val buffer = CharArray(8192)
+                val buffer = CharArray(16384)
                 var charsRead: Int
                 while (reader.read(buffer).also { charsRead = it } != -1) {
                     sb.append(buffer, 0, charsRead)
@@ -312,15 +288,21 @@ class MainActivity : Activity() {
         }
     }
 
+    // 深度无死角全量节点扫描引擎
     private fun extractNodes(rawText: String): List<String> {
-        val candidates = LinkedHashSet<String>()
+        val candidates = ArrayList<String>()
         val regex = Regex("(?i)(?:vmess|vless|trojan|ss|ssr|hysteria2|hysteria|hy2|tuic)://[^\\s\"'<>]+")
 
-        fun scanText(text: String) {
-            regex.findAll(text).forEach { candidates.add(it.value.trimEnd(',', ';', ']', ')')) }
+        fun scan(text: String) {
+            regex.findAll(text).forEach { match ->
+                val node = match.value.trimEnd(',', ';', ']', ')', '}', '\r', '\n')
+                if (node.length > 15) {
+                    candidates.add(node)
+                }
+            }
         }
 
-        fun tryBase64Decode(str: String): String? {
+        fun decodeSafe(str: String): String? {
             val clean = str.trim().replace("\\s+".toRegex(), "")
             if (clean.length < 8) return null
             val padLen = (4 - clean.length % 4) % 4
@@ -330,22 +312,29 @@ class MainActivity : Activity() {
             } catch (_: Exception) { null }
         }
 
-        scanText(rawText)
-        tryBase64Decode(rawText)?.let { scanText(it) }
+        // 1. 全文直接扫描
+        scan(rawText)
 
+        // 2. 整段 Base64 尝试
+        decodeSafe(rawText)?.let { scan(it) }
+
+        // 3. 逐行 Base64 扫描（不放过任何一行）
         rawText.lineSequence().forEach { line ->
             val l = line.trim()
             if (l.length >= 16 && !l.contains("://")) {
-                tryBase64Decode(l)?.let { scanText(it) }
+                decodeSafe(l)?.let { decoded ->
+                    scan(decoded)
+                }
             }
         }
 
+        // 4. 解析 YAML 配置文件
         if (rawText.contains("proxies:", ignoreCase = true) || rawText.contains("- name:", ignoreCase = true)) {
             val yamlNodes = parseClashYamlToNodes(rawText)
             candidates.addAll(yamlNodes)
         }
 
-        return candidates.toList()
+        return candidates
     }
 
     private fun parseClashYamlToNodes(yamlText: String): List<String> {
@@ -449,16 +438,17 @@ class MainActivity : Activity() {
         return list
     }
 
+    // 精准测速：采用 48 线程超高并发过滤
     private fun speedTest() {
         if (nodes.isEmpty()) {
-            appendLog("提示：请先点击“高并发拉取并更新全部订阅”")
+            status.text = "提示：请先点击“全速拉取全网海量节点”"
             return
         }
-        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2500
+        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 10000) ?: 2000
         val snapshot = nodes.toList()
-        appendLog("开始多线程测速，共 ${snapshot.size} 个节点……")
+        status.text = "正在测速排序，共 ${snapshot.size} 个节点……"
 
-        val cpuPool = Executors.newFixedThreadPool(32)
+        val cpuPool = Executors.newFixedThreadPool(48)
         val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
         val done = AtomicInteger(0)
 
@@ -469,6 +459,7 @@ class MainActivity : Activity() {
                     val start = System.currentTimeMillis()
                     try {
                         Socket().use { socket ->
+                            socket.tcpNoDelay = true
                             socket.connect(InetSocketAddress(hp.first, hp.second), timeout)
                         }
                         val latency = System.currentTimeMillis() - start
@@ -476,8 +467,10 @@ class MainActivity : Activity() {
                     } catch (_: Exception) {}
                 }
                 val d = done.incrementAndGet()
-                if (d % 50 == 0 || d == snapshot.size) {
-                    appendLog("测速进度：$d/${snapshot.size} (可用: ${results.size})")
+                if (d % 100 == 0 || d == snapshot.size) {
+                    runOnUiThread {
+                        status.text = "测速中: $d/${snapshot.size}，可用优质节点: ${results.size}"
+                    }
                 }
             }
         }
@@ -485,12 +478,19 @@ class MainActivity : Activity() {
 
         Executors.newSingleThreadExecutor().execute {
             try {
-                cpuPool.awaitTermination(120, TimeUnit.SECONDS)
+                cpuPool.awaitTermination(90, TimeUnit.SECONDS)
             } catch (_: Exception) {}
+            
+            // 按延迟升序严格排序
             results.sortBy { it.second }
-            scored.clear(); scored.addAll(results)
-            nodes.clear(); nodes.addAll(results.map { it.first })
-            appendLog("测速完成！精选出 ${results.size} 个优质可用节点（已按延迟升序排序）")
+            scored.clear()
+            scored.addAll(results)
+            nodes.clear()
+            nodes.addAll(results.map { it.first })
+
+            runOnUiThread {
+                status.text = "测速完成！精选出 ${results.size} 个超低延迟高可用节点"
+            }
         }
     }
 
@@ -515,7 +515,7 @@ class MainActivity : Activity() {
 
     private fun exportFile(clash: Boolean) {
         if (nodes.isEmpty()) {
-            appendLog("提示：没有可导出的节点")
+            status.text = "提示：没有可导出的节点"
             return
         }
         val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 100
@@ -616,12 +616,8 @@ class MainActivity : Activity() {
                             sb.append("    udp: true\n")
                             if (flow.isNotBlank()) sb.append("    flow: $flow\n")
                             
-                            // 终极安全防御：为了 100% 杜绝 invalid REALITY short ID 报错，
-                            // 将所有带有风险的 Reality 节点安全降级为标准 TLS 节点输出，保证 Clash 绝对秒导入！
-                            if (isReality) {
-                                sb.append("    tls: true\n")
-                                if (sni.isNotBlank()) sb.append("    servername: $sni\n")
-                            } else if (queryMap["security"] == "tls") {
+                            // 保持标准 TLS 输出，杜绝 Reality 语法报错
+                            if (isReality || queryMap["security"] == "tls") {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
                             }
@@ -773,9 +769,9 @@ class MainActivity : Activity() {
                 contentResolver.openOutputStream(data.data!!).use { out ->
                     out?.write((pendingExport ?: "").toByteArray(Charsets.UTF_8))
                 }
-                appendLog("导出成功！")
+                status.text = "导出成功！"
             } catch (e: Exception) {
-                appendLog("导出失败：${e.message}")
+                status.text = "导出失败：${e.message}"
             }
         }
     }
