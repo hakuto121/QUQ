@@ -2,4 +2,5 @@
 <resources>
     <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
     </style>
+    <string name="app_name">征兵处</string>
 </resources>
