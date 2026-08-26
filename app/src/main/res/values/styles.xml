@@ -1,6 +1,3 @@
 <resources>
-    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#3F51B5</item>
-    </style>
+    <string name="app_name">征兵处</string>
 </resources>
