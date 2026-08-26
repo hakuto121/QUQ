@@ -14,7 +14,6 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -43,7 +42,6 @@ class MainActivity : Activity() {
         "https://raw.githubusercontent.com/ninjastrikers/Nexus-nodes/main/configs/all.txt"
     )
 
-    private val executor = Executors.newFixedThreadPool(16)
     private var pendingExport: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,19 +73,19 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "征兵处 - 节点池管理器"
+            text = "征兵处 - 节点池管理中枢"
             textSize = 22f
             setPadding(0, 0, 0, 16)
         })
 
         root.addView(TextView(this).apply {
-            text = "输入订阅源地址 (TXT / Base64 / YAML)："
+            text = "订阅源地址 (支持 TXT / Base64 / Clash YAML)："
             textSize = 13f
             setPadding(0, 0, 0, 4)
         })
 
         sourceInput = EditText(this).apply {
-            hint = "https://raw.githubusercontent.com/..."
+            hint = "https://..."
             minLines = 2
         }
         root.addView(sourceInput)
@@ -114,37 +112,54 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        val updateBtn = Button(this).apply { text = "提取节点" }
+        val updateBtn = Button(this).apply { text = "全量抓取并解析节点" }
         root.addView(updateBtn)
 
-        val speedBtn = Button(this).apply { text = "智能测速" }
+        val speedBtn = Button(this).apply { text = "并发 TCP 智能测速排序" }
         root.addView(speedBtn)
 
+        val configRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8, 0, 8)
+        }
+
         timeoutInput = EditText(this).apply {
-            hint = "测速超时（毫秒）"
+            hint = "测速超时(ms)"
             setText("2500")
             inputType = 2
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        root.addView(timeoutInput)
-
         countInput = EditText(this).apply {
-            hint = "导出节点数量"
+            hint = "导出上限数"
             setText("300")
             inputType = 2
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        root.addView(countInput)
+        configRow.addView(timeoutInput)
+        configRow.addView(countInput)
+        root.addView(configRow)
 
-        val exportTxt = Button(this).apply { text = "导出 TXT" }
-        root.addView(exportTxt)
+        val btnRow2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 8)
+        }
+        val exportTxt = Button(this).apply {
+            text = "导出 URI (TXT)"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val exportClash = Button(this).apply {
+            text = "导出 Clash (YAML)"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        btnRow2.addView(exportTxt)
+        btnRow2.addView(exportClash)
+        root.addView(btnRow2)
 
-        val exportClash = Button(this).apply { text = "导出 YAML" }
-        root.addView(exportClash)
-
-        val clearBtn = Button(this).apply { text = "清空节点池" }
+        val clearBtn = Button(this).apply { text = "清空当前节点池缓存" }
         root.addView(clearBtn)
 
         status = TextView(this).apply {
-            textSize = 14f
+            textSize = 13f
             setPadding(0, 20, 0, 0)
         }
         root.addView(status)
@@ -154,14 +169,14 @@ class MainActivity : Activity() {
 
         addBtn.setOnClickListener {
             val u = sourceInput.text.toString().trim()
-            if (u.startsWith("http://") || u.startsWith("https://")) {
+            if (u.startsWith("http://", ignoreCase = true) || u.startsWith("https://", ignoreCase = true)) {
                 sources.add(u)
                 saveSources()
                 sourceInput.text.clear()
                 refreshSourceList()
                 status.text = "添加成功，当前共 ${sources.size} 个源"
             } else {
-                status.text = "请输入 http:// 或 https:// 开头的链接"
+                status.text = "错误：请输入有效 http/https 链接"
             }
         }
 
@@ -193,7 +208,7 @@ class MainActivity : Activity() {
     private fun refreshSourceList() {
         sourceContainer.removeAllViews()
         val title = TextView(this).apply {
-            text = "当前订阅源列表（共 ${sources.size} 个）："
+            text = "当前订阅源列表（${sources.size} 个）："
             textSize = 13f
             setPadding(0, 8, 0, 4)
         }
@@ -207,7 +222,7 @@ class MainActivity : Activity() {
             }
             val labelView = TextView(this).apply {
                 text = "${i + 1}. $s"
-                textSize = 12f
+                textSize = 11f
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
             val delBtn = Button(this).apply {
@@ -218,7 +233,7 @@ class MainActivity : Activity() {
                     sources.remove(s)
                     saveSources()
                     refreshSourceList()
-                    status.text = "已删除 1 个源"
+                    status.text = "已移除订阅源"
                 }
             }
             row.addView(labelView)
@@ -232,9 +247,9 @@ class MainActivity : Activity() {
             status.text = "请先添加订阅源"
             return
         }
-        status.text = "正在高并发全量提取节点中……"
+        status.text = "正在启动多线程抓取节点..."
 
-        val pool = Executors.newFixedThreadPool(sources.size.coerceIn(4, 24))
+        val pool = Executors.newFixedThreadPool(sources.size.coerceIn(4, 32))
         val collectedNodes = Collections.synchronizedList(ArrayList<String>())
         val completedCount = AtomicInteger(0)
         val total = sources.size
@@ -251,7 +266,7 @@ class MainActivity : Activity() {
 
                 val current = completedCount.incrementAndGet()
                 runOnUiThread {
-                    status.text = "提取进度: $current/$total 源，已捕获 ${collectedNodes.size} 个节点"
+                    status.text = "抓取进度: $current/$total 源完成，累计捕获 ${collectedNodes.size} 个原始节点"
                 }
             }
         }
@@ -260,18 +275,40 @@ class MainActivity : Activity() {
 
         Executors.newSingleThreadExecutor().execute {
             try {
-                pool.awaitTermination(60, TimeUnit.SECONDS)
+                pool.awaitTermination(90, TimeUnit.SECONDS)
             } catch (_: Exception) {}
 
-            val distinctList = collectedNodes.distinct()
+            val distinctList = deduplicateNodes(collectedNodes)
             nodes.clear()
             nodes.addAll(distinctList)
             scored.clear()
 
             runOnUiThread {
-                status.text = "提取完成！共捕获 ${nodes.size} 个高纯度代理节点"
+                status.text = "全量抓取完成！去重后保留 ${nodes.size} 个有效节点，建议点击测速"
             }
         }
+    }
+
+    private fun deduplicateNodes(rawList: List<String>): List<String> {
+        val seenServerPort = HashSet<String>()
+        val result = ArrayList<String>()
+
+        for (node in rawList) {
+            val trimmed = node.trim()
+            if (trimmed.isBlank()) continue
+            val hp = parseHostPort(trimmed)
+            if (hp != null) {
+                val key = "${hp.first.lowercase()}:${hp.second}"
+                if (seenServerPort.add(key)) {
+                    result.add(trimmed)
+                }
+            } else {
+                if (!result.contains(trimmed)) {
+                    result.add(trimmed)
+                }
+            }
+        }
+        return result
     }
 
     private fun downloadWithTimeout(urlStr: String): String {
@@ -284,9 +321,9 @@ class MainActivity : Activity() {
                 conn = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
                     connectTimeout = 8000
-                    readTimeout = 15000
+                    readTimeout = 12000
                     instanceFollowRedirects = true
-                    setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ClashMeta/v1.18.0")
+                    setRequestProperty("User-Agent", "ClashMeta/v1.18.0 (Android; arm64-v8a)")
                     setRequestProperty("Accept", "*/*")
                 }
 
@@ -314,11 +351,11 @@ class MainActivity : Activity() {
 
     private fun extractNodesFull(rawText: String): List<String> {
         val candidates = ArrayList<String>()
-        val prefixes = listOf("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hysteria2://", "hysteria://", "hy2://", "tuic://")
+        val prefixes = listOf("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "hysteria2://", "hysteria://", "tuic://")
 
         fun scanText(text: String) {
             text.lines().forEach { line ->
-                val l = line.trimEnd(',', ';', ']', ')', '}', '\r', '\n', ' ')
+                val l = line.trim().trimEnd(',', ';', ']', ')', '}', '\r', '\n')
                 if (prefixes.any { l.startsWith(it, ignoreCase = true) }) {
                     candidates.add(l)
                 }
@@ -337,13 +374,9 @@ class MainActivity : Activity() {
             } catch (_: Exception) { null }
         }
 
-        // 1. 直接文本扫描
         scanText(rawText)
-
-        // 2. 整段 Base64 尝试
         tryBase64(rawText)?.let { scanText(it) }
 
-        // 3. 逐行 Base64 扫描
         rawText.lineSequence().forEach { line ->
             val l = line.trim()
             if (l.length >= 16 && !l.contains("://")) {
@@ -351,7 +384,6 @@ class MainActivity : Activity() {
             }
         }
 
-        // 4. YAML 解析
         if (rawText.contains("proxies:", ignoreCase = true) || rawText.contains("- name:", ignoreCase = true)) {
             val yamlNodes = parseClashYamlToNodes(rawText)
             candidates.addAll(yamlNodes)
@@ -402,7 +434,10 @@ class MainActivity : Activity() {
                                 val tls = if (map["tls"] == "true") "tls" else "none"
                                 val net = map["network"] ?: "tcp"
                                 val sni = map["servername"] ?: map["sni"] ?: ""
-                                val uri = "vless://$uuid@$server:$port?security=$tls&type=$net&sni=$sni#$encodedName"
+                                val flow = map["flow"] ?: ""
+                                val isReality = map["reality-opts"] != null || map["reality"] == "true"
+                                val sec = if (isReality) "reality" else tls
+                                val uri = "vless://$uuid@$server:$port?security=$sec&type=$net&sni=$sni&flow=$flow#$encodedName"
                                 list.add(uri)
                             }
                         }
@@ -469,12 +504,12 @@ class MainActivity : Activity() {
 
     private fun speedTest() {
         if (nodes.isEmpty()) {
-            status.text = "提示：请先点击“提取节点”"
+            status.text = "提示：节点池为空，请先抓取节点"
             return
         }
         val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 10000) ?: 2500
         val snapshot = nodes.toList()
-        status.text = "正在执行智能测速：0/${snapshot.size}"
+        status.text = "并发连通性测速中：0/${snapshot.size}"
 
         val cpuPool = Executors.newFixedThreadPool(48)
         val results = Collections.synchronizedList(ArrayList<Pair<String, Long>>())
@@ -488,6 +523,7 @@ class MainActivity : Activity() {
                     try {
                         Socket().use { socket ->
                             socket.tcpNoDelay = true
+                            socket.soTimeout = timeout
                             socket.connect(InetSocketAddress(hp.first, hp.second), timeout)
                         }
                         val latency = System.currentTimeMillis() - start
@@ -495,9 +531,9 @@ class MainActivity : Activity() {
                     } catch (_: Exception) {}
                 }
                 val d = done.incrementAndGet()
-                if (d % 50 == 0 || d == snapshot.size) {
+                if (d % 30 == 0 || d == snapshot.size) {
                     runOnUiThread {
-                        status.text = "测速中: $d/${snapshot.size}，可用节点: ${results.size}"
+                        status.text = "测速中: $d/${snapshot.size}，可用存活: ${results.size}"
                     }
                 }
             }
@@ -516,7 +552,7 @@ class MainActivity : Activity() {
             nodes.addAll(results.map { it.first })
 
             runOnUiThread {
-                status.text = "测速完成！精选出 ${results.size} 个可用节点（已按延迟升序排序）"
+                status.text = "测速完成！精选出 ${results.size} 个可用低延迟节点（已升序排列）"
             }
         }
     }
@@ -524,19 +560,36 @@ class MainActivity : Activity() {
     private fun parseHostPort(node: String): Pair<String, Int>? {
         return try {
             val u = node.trim()
-            if (u.startsWith("vmess://", ignoreCase = true)) {
-                val b = u.substring(8)
-                val padLen = (4 - b.length % 4) % 4
-                val decoded = Base64.decode(b + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP).toString(StandardCharsets.UTF_8)
-                val obj = JSONObject(decoded)
-                val host = obj.optString("add").ifBlank { return null }
-                val port = obj.optInt("port", 443)
-                return host to port
+            when {
+                u.startsWith("vmess://", ignoreCase = true) -> {
+                    val b = u.substring(8)
+                    val padLen = (4 - b.length % 4) % 4
+                    val decoded = Base64.decode(b + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP).toString(StandardCharsets.UTF_8)
+                    val obj = JSONObject(decoded)
+                    val host = obj.optString("add").ifBlank { return null }
+                    val port = obj.optInt("port", 443)
+                    host to port
+                }
+                u.startsWith("ss://", ignoreCase = true) -> {
+                    val body = u.substring(5).substringBefore("#")
+                    val serverPart = if (body.contains("@")) body.substringAfter("@") else body
+                    val cleanHostPort = if (serverPart.contains(":")) serverPart else {
+                        val padLen = (4 - serverPart.length % 4) % 4
+                        Base64.decode(serverPart + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP).toString(StandardCharsets.UTF_8)
+                    }
+                    val hp = cleanHostPort.substringAfter("@", cleanHostPort)
+                    val host = hp.substringBefore(":")
+                    val port = hp.substringAfter(":").toIntOrNull() ?: 8388
+                    if (host.isNotBlank()) host to port else null
+                }
+                else -> {
+                    val raw = u.substringAfter("://").substringBefore("#").substringBefore("?")
+                    val hostPort = if (raw.contains("@")) raw.substringAfter("@") else raw
+                    val host = hostPort.substringBefore(":")
+                    val port = hostPort.substringAfter(":", "443").toIntOrNull() ?: 443
+                    if (host.isNotBlank()) host to port else null
+                }
             }
-            val uri = URI(u)
-            val host = uri.host ?: return null
-            val port = if (uri.port > 0) uri.port else 443
-            host to port
         } catch (_: Exception) { null }
     }
 
@@ -578,18 +631,13 @@ class MainActivity : Activity() {
                         val padLen = (4 - b.length % 4) % 4
                         val json = String(Base64.decode(b + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP), StandardCharsets.UTF_8)
                         val obj = JSONObject(json)
-                        val rawName = obj.optString("ps").ifBlank { "VMess" }
-                        val name = cleanName(rawName, idx)
+                        val name = cleanName(obj.optString("ps").ifBlank { "VMess" }, idx)
                         val server = obj.optString("add")
                         val port = obj.optInt("port", 443)
                         val uuid = obj.optString("id")
                         val alterId = obj.optInt("aid", 0)
-
-                        var cipher = obj.optString("scy", "auto")
-                        if (cipher.isBlank() || cipher.equals("null", ignoreCase = true)) {
-                            cipher = "auto"
-                        }
-
+                        var cipher = obj.optString("scy", "auto").ifBlank { "auto" }
+                        if (cipher.equals("null", ignoreCase = true)) cipher = "auto"
                         val net = obj.optString("net", "tcp")
                         val tls = obj.optString("tls") == "tls"
                         val sni = obj.optString("sni", "")
@@ -615,23 +663,33 @@ class MainActivity : Activity() {
                                 sb.append("    ws-opts:\n")
                                 if (path.isNotBlank()) sb.append("      path: \"$path\"\n")
                                 if (host.isNotBlank()) sb.append("      headers:\n        Host: $host\n")
+                            } else if (net == "grpc") {
+                                sb.append("    network: grpc\n")
+                                sb.append("    grpc-opts:\n      grpc-service-name: \"$path\"\n")
                             }
                             proxyYamlList.add(sb.toString().trimEnd())
                             proxyNames.add(name)
                         }
                     }
                     node.startsWith("vless://", ignoreCase = true) -> {
-                        val uri = URI(node)
-                        val uuid = uri.userInfo ?: ""
-                        val server = uri.host ?: ""
-                        val port = if (uri.port > 0) uri.port else 443
-                        val queryMap = parseQuery(uri.rawQuery ?: "")
-                        val rawRemark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "VLESS"
+                        val body = node.substring(8)
+                        val uuid = body.substringBefore("@")
+                        val rest = body.substringAfter("@")
+                        val serverPort = rest.substringBefore("?").substringBefore("#")
+                        val server = serverPort.substringBefore(":")
+                        val port = serverPort.substringAfter(":", "443").toIntOrNull() ?: 443
+                        val queryStr = if (rest.contains("?")) rest.substringAfter("?").substringBefore("#") else ""
+                        val queryMap = parseQuery(queryStr)
+                        val rawRemark = if (rest.contains("#")) URLDecoder.decode(rest.substringAfter("#"), "UTF-8") else "VLESS"
                         val name = cleanName(rawRemark, idx)
-                        val isReality = queryMap["security"] == "reality"
+
+                        val sec = queryMap["security"] ?: ""
                         val flow = queryMap["flow"] ?: ""
                         val sni = queryMap["sni"] ?: ""
                         val net = queryMap["type"] ?: "tcp"
+                        val pbk = queryMap["pbk"] ?: ""
+                        val sid = queryMap["sid"] ?: ""
+                        val fp = queryMap["fp"] ?: "chrome"
 
                         if (server.isNotBlank() && uuid.isNotBlank()) {
                             val sb = StringBuilder()
@@ -643,7 +701,14 @@ class MainActivity : Activity() {
                             sb.append("    udp: true\n")
                             if (flow.isNotBlank()) sb.append("    flow: $flow\n")
 
-                            if (isReality || queryMap["security"] == "tls") {
+                            if (sec == "reality") {
+                                sb.append("    tls: true\n")
+                                if (sni.isNotBlank()) sb.append("    servername: $sni\n")
+                                sb.append("    reality-opts:\n")
+                                sb.append("      public-key: $pbk\n")
+                                if (sid.isNotBlank()) sb.append("      short-id: $sid\n")
+                                sb.append("    client-fingerprint: $fp\n")
+                            } else if (sec == "tls") {
                                 sb.append("    tls: true\n")
                                 if (sni.isNotBlank()) sb.append("    servername: $sni\n")
                             }
@@ -653,20 +718,26 @@ class MainActivity : Activity() {
                                 sb.append("    ws-opts:\n")
                                 queryMap["path"]?.let { sb.append("      path: \"$it\"\n") }
                                 queryMap["host"]?.let { sb.append("      headers:\n        Host: $it\n") }
+                            } else if (net == "grpc") {
+                                sb.append("    network: grpc\n")
+                                sb.append("    grpc-opts:\n      grpc-service-name: \"${queryMap["serviceName"] ?: queryMap["path"] ?: ""}\"\n")
                             }
                             proxyYamlList.add(sb.toString().trimEnd())
                             proxyNames.add(name)
                         }
                     }
                     node.startsWith("trojan://", ignoreCase = true) -> {
-                        val uri = URI(node)
-                        val password = uri.userInfo ?: ""
-                        val server = uri.host ?: ""
-                        val port = if (uri.port > 0) uri.port else 443
-                        val queryMap = parseQuery(uri.rawQuery ?: "")
-                        val rawRemark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "Trojan"
+                        val body = node.substring(9)
+                        val password = body.substringBefore("@")
+                        val rest = body.substringAfter("@")
+                        val serverPort = rest.substringBefore("?").substringBefore("#")
+                        val server = serverPort.substringBefore(":")
+                        val port = serverPort.substringAfter(":", "443").toIntOrNull() ?: 443
+                        val queryStr = if (rest.contains("?")) rest.substringAfter("?").substringBefore("#") else ""
+                        val queryMap = parseQuery(queryStr)
+                        val rawRemark = if (rest.contains("#")) URLDecoder.decode(rest.substringAfter("#"), "UTF-8") else "Trojan"
                         val name = cleanName(rawRemark, idx)
-                        val sni = queryMap["sni"] ?: ""
+                        val sni = queryMap["sni"] ?: queryMap["peer"] ?: ""
 
                         if (server.isNotBlank() && password.isNotBlank()) {
                             val sb = StringBuilder()
@@ -682,39 +753,36 @@ class MainActivity : Activity() {
                         }
                     }
                     node.startsWith("ss://", ignoreCase = true) -> {
-                        val uri = URI(node)
-                        val rawRemark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "SS"
+                        val body = node.substring(5)
+                        val rawRemark = if (body.contains("#")) URLDecoder.decode(body.substringAfter("#"), "UTF-8") else "SS"
                         val name = cleanName(rawRemark, idx)
-                        var userInfo = uri.userInfo ?: ""
+                        val mainPart = body.substringBefore("#")
+                        var userInfo: String
                         val server: String
                         val port: Int
 
-                        if (userInfo.isNotBlank()) {
-                            if (!userInfo.contains(":")) {
-                                userInfo = try {
-                                    val padLen = (4 - userInfo.length % 4) % 4
-                                    String(Base64.decode(userInfo + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP), StandardCharsets.UTF_8)
-                                } catch (_: Exception) { "" }
-                            }
-                            server = uri.host ?: ""
-                            port = if (uri.port > 0) uri.port else 8388
+                        if (mainPart.contains("@")) {
+                            val userBase = mainPart.substringBefore("@")
+                            userInfo = if (!userBase.contains(":")) {
+                                val padLen = (4 - userBase.length % 4) % 4
+                                try { String(Base64.decode(userBase + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP), StandardCharsets.UTF_8) } catch (_: Exception) { "" }
+                            } else userBase
+                            val sp = mainPart.substringAfter("@")
+                            server = sp.substringBefore(":")
+                            port = sp.substringAfter(":", "8388").toIntOrNull() ?: 8388
                         } else {
-                            val rawPart = node.substring(5).substringBefore("#")
-                            val userBase = rawPart.substringBefore("@")
-                            val padLen = (4 - userBase.length % 4) % 4
-                            val decoded = try {
-                                String(Base64.decode(userBase + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP), StandardCharsets.UTF_8)
-                            } catch (_: Exception) { "" }
-                            userInfo = decoded
-                            val hostPort = rawPart.substringAfter("@", "")
-                            server = hostPort.substringBefore(":")
-                            port = hostPort.substringAfter(":", "8388").toIntOrNull() ?: 8388
+                            val padLen = (4 - mainPart.length % 4) % 4
+                            val decoded = try { String(Base64.decode(mainPart + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP), StandardCharsets.UTF_8) } catch (_: Exception) { "" }
+                            userInfo = decoded.substringBefore("@")
+                            val sp = decoded.substringAfter("@", "")
+                            server = sp.substringBefore(":")
+                            port = sp.substringAfter(":", "8388").toIntOrNull() ?: 8388
                         }
 
                         val cipher = userInfo.substringBefore(":", "").trim()
                         val password = userInfo.substringAfter(":", "").trim()
 
-                        if (server.isNotBlank() && cipher.isNotBlank() && password.isNotBlank() && !cipher.equals("null", ignoreCase = true)) {
+                        if (server.isNotBlank() && cipher.isNotBlank() && password.isNotBlank()) {
                             val sb = StringBuilder()
                             sb.append("  - name: \"$name\"\n")
                             sb.append("    type: ss\n")
@@ -723,6 +791,31 @@ class MainActivity : Activity() {
                             sb.append("    cipher: $cipher\n")
                             sb.append("    password: $password\n")
                             sb.append("    udp: true\n")
+                            proxyYamlList.add(sb.toString().trimEnd())
+                            proxyNames.add(name)
+                        }
+                    }
+                    node.startsWith("hy2://", ignoreCase = true) || node.startsWith("hysteria2://", ignoreCase = true) -> {
+                        val body = if (node.startsWith("hy2://", ignoreCase = true)) node.substring(6) else node.substring(12)
+                        val auth = body.substringBefore("@")
+                        val rest = body.substringAfter("@")
+                        val serverPort = rest.substringBefore("?").substringBefore("#")
+                        val server = serverPort.substringBefore(":")
+                        val port = serverPort.substringAfter(":", "443").toIntOrNull() ?: 443
+                        val queryStr = if (rest.contains("?")) rest.substringAfter("?").substringBefore("#") else ""
+                        val queryMap = parseQuery(queryStr)
+                        val rawRemark = if (rest.contains("#")) URLDecoder.decode(rest.substringAfter("#"), "UTF-8") else "Hy2"
+                        val name = cleanName(rawRemark, idx)
+                        val sni = queryMap["sni"] ?: ""
+
+                        if (server.isNotBlank() && auth.isNotBlank()) {
+                            val sb = StringBuilder()
+                            sb.append("  - name: \"$name\"\n")
+                            sb.append("    type: hysteria2\n")
+                            sb.append("    server: $server\n")
+                            sb.append("    port: $port\n")
+                            sb.append("    password: $auth\n")
+                            if (sni.isNotBlank()) sb.append("    sni: $sni\n")
                             proxyYamlList.add(sb.toString().trimEnd())
                             proxyNames.add(name)
                         }
