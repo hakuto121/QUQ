@@ -275,7 +275,7 @@ class MainActivity : Activity() {
 
         Executors.newSingleThreadExecutor().execute {
             try {
-                pool.awaitTermination(90, TimeUnit.SECONDS)
+                pool.awaitTermination(120, TimeUnit.SECONDS)
             } catch (_: Exception) {}
 
             val distinctList = deduplicateNodes(collectedNodes)
@@ -349,20 +349,13 @@ class MainActivity : Activity() {
         return result
     }
 
+    // ==================== 全协议 / 多格式万能提取核心 ====================
+
     private fun extractNodesFull(rawText: String): List<String> {
-        val candidates = ArrayList<String>()
+        val candidates = LinkedHashSet<String>()
         val prefixes = listOf("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "hysteria2://", "hysteria://", "tuic://")
 
-        fun scanText(text: String) {
-            text.lines().forEach { line ->
-                val l = line.trim().trimEnd(',', ';', ']', ')', '}', '\r', '\n')
-                if (prefixes.any { l.startsWith(it, ignoreCase = true) }) {
-                    candidates.add(l)
-                }
-            }
-        }
-
-        fun tryBase64(s: String): String? {
+        fun tryBase64Decode(s: String): String? {
             val clean = s.trim().replace("\\s+".toRegex(), "").replace("-", "+").replace("_", "/")
             if (clean.length < 8) return null
             val padLen = (4 - clean.length % 4) % 4
@@ -370,26 +363,39 @@ class MainActivity : Activity() {
             return try {
                 val data = Base64.decode(padded, Base64.DEFAULT or Base64.NO_WRAP or Base64.URL_SAFE)
                 val decoded = String(data, StandardCharsets.UTF_8)
-                if (prefixes.any { decoded.contains(it, ignoreCase = true) }) decoded else null
+                if (decoded.any { it.isLetterOrDigit() || it in ":/?#=&" }) decoded else null
             } catch (_: Exception) { null }
         }
 
-        scanText(rawText)
-        tryBase64(rawText)?.let { scanText(it) }
+        // 递归扫描文本与解码
+        fun parseRecursive(text: String, depth: Int = 0) {
+            if (depth > 3 || text.isBlank()) return
 
-        rawText.lineSequence().forEach { line ->
-            val l = line.trim()
-            if (l.length >= 16 && !l.contains("://")) {
-                tryBase64(l)?.let { scanText(it) }
+            // 1. 逐行提取 URI
+            text.lines().forEach { line ->
+                val l = line.trim().trimEnd(',', ';', ']', ')', '}', '\r', '\n')
+                if (prefixes.any { l.startsWith(it, ignoreCase = true) }) {
+                    candidates.add(l)
+                } else if (l.length >= 16 && !l.contains("://") && !l.contains("proxies:", ignoreCase = true)) {
+                    tryBase64Decode(l)?.let { decodedLine ->
+                        parseRecursive(decodedLine, depth + 1)
+                    }
+                }
+            }
+
+            // 2. 整块文本 Base64 解码扫描
+            tryBase64Decode(text)?.let { decodedFull ->
+                parseRecursive(decodedFull, depth + 1)
+            }
+
+            // 3. YAML 结构扫描
+            if (text.contains("proxies:", ignoreCase = true) || text.contains("- name:", ignoreCase = true) || text.contains("server:", ignoreCase = true)) {
+                candidates.addAll(parseClashYamlToNodes(text))
             }
         }
 
-        if (rawText.contains("proxies:", ignoreCase = true) || rawText.contains("- name:", ignoreCase = true)) {
-            val yamlNodes = parseClashYamlToNodes(rawText)
-            candidates.addAll(yamlNodes)
-        }
-
-        return candidates
+        parseRecursive(rawText)
+        return candidates.toList()
     }
 
     private fun parseClashYamlToNodes(yamlText: String): List<String> {
@@ -397,110 +403,148 @@ class MainActivity : Activity() {
         val lines = yamlText.lines()
         var currentMap: MutableMap<String, String>? = null
 
+        fun convertMapToUri(map: Map<String, String>): String? {
+            return try {
+                val type = map["type"]?.lowercase()?.trim() ?: return null
+                val server = map["server"]?.trim() ?: return null
+                val port = map["port"]?.trim() ?: "443"
+                val name = map["name"]?.trim() ?: "Node"
+                val encodedName = Uri.encode(name)
+
+                when (type) {
+                    "vmess" -> {
+                        val uuid = map["uuid"] ?: ""
+                        if (server.isNotBlank() && uuid.isNotBlank()) {
+                            val obj = JSONObject().apply {
+                                put("v", "2")
+                                put("ps", name)
+                                put("add", server)
+                                put("port", port)
+                                put("id", uuid)
+                                put("aid", map["alterId"] ?: "0")
+                                put("scy", map["cipher"]?.takeIf { it != "null" && it.isNotBlank() } ?: "auto")
+                                put("net", map["network"] ?: "tcp")
+                                put("tls", if (map["tls"] == "true") "tls" else "")
+                                put("sni", map["servername"] ?: map["sni"] ?: "")
+                                put("host", map["host"] ?: map["ws-headers-host"] ?: "")
+                                put("path", map["path"] ?: map["ws-path"] ?: "")
+                            }
+                            val b64 = Base64.encodeToString(obj.toString().toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
+                            "vmess://$b64"
+                        } else null
+                    }
+                    "vless" -> {
+                        val uuid = map["uuid"] ?: ""
+                        if (server.isNotBlank() && uuid.isNotBlank()) {
+                            val tls = if (map["tls"] == "true") "tls" else "none"
+                            val net = map["network"] ?: "tcp"
+                            val sni = map["servername"] ?: map["sni"] ?: ""
+                            val flow = map["flow"] ?: ""
+                            val isReality = map["reality-opts"] != null || map["reality"] == "true" || map.containsKey("public-key")
+                            val sec = if (isReality) "reality" else tls
+                            val pbk = map["public-key"] ?: map["pbk"] ?: ""
+                            val sid = map["short-id"] ?: map["sid"] ?: ""
+                            val fp = map["client-fingerprint"] ?: map["fp"] ?: "chrome"
+                            val path = Uri.encode(map["path"] ?: map["ws-path"] ?: "")
+                            val host = Uri.encode(map["host"] ?: map["ws-headers-host"] ?: "")
+
+                            val query = StringBuilder("security=$sec&type=$net&sni=$sni&flow=$flow")
+                            if (sec == "reality") query.append("&pbk=$pbk&sid=$sid&fp=$fp")
+                            if (path.isNotBlank()) query.append("&path=$path")
+                            if (host.isNotBlank()) query.append("&host=$host")
+
+                            "vless://$uuid@$server:$port?$query#$encodedName"
+                        } else null
+                    }
+                    "trojan" -> {
+                        val password = map["password"] ?: ""
+                        if (server.isNotBlank() && password.isNotBlank()) {
+                            val sni = map["sni"] ?: map["servername"] ?: map["peer"] ?: ""
+                            "trojan://$password@$server:$port?sni=$sni#$encodedName"
+                        } else null
+                    }
+                    "ss" -> {
+                        val cipher = map["cipher"]?.takeIf { it != "null" && it.isNotBlank() } ?: "aes-128-gcm"
+                        val password = map["password"] ?: ""
+                        if (server.isNotBlank() && password.isNotBlank()) {
+                            val userPart = Base64.encodeToString("$cipher:$password".toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
+                            "ss://$userPart@$server:$port#$encodedName"
+                        } else null
+                    }
+                    "hysteria2", "hy2" -> {
+                        val auth = map["password"] ?: map["auth"] ?: ""
+                        val sni = map["sni"] ?: map["servername"] ?: ""
+                        if (server.isNotBlank() && auth.isNotBlank()) {
+                            "hy2://$auth@$server:$port?sni=$sni#$encodedName"
+                        } else null
+                    }
+                    "tuic" -> {
+                        val uuid = map["uuid"] ?: map["token"] ?: ""
+                        val password = map["password"] ?: ""
+                        val sni = map["sni"] ?: map["servername"] ?: ""
+                        val congestion = map["congestion-controller"] ?: "bbr"
+                        if (server.isNotBlank() && uuid.isNotBlank()) {
+                            "tuic://$uuid:$password@$server:$port?sni=$sni&congestion_control=$congestion#$encodedName"
+                        } else null
+                    }
+                    else -> null
+                }
+            } catch (_: Exception) { null }
+        }
+
         fun flushCurrent() {
             currentMap?.let { map ->
-                try {
-                    val type = map["type"]?.lowercase() ?: ""
-                    val server = map["server"] ?: ""
-                    val port = map["port"] ?: "443"
-                    val name = map["name"] ?: "Node"
-                    val encodedName = Uri.encode(name)
-
-                    when (type) {
-                        "vmess" -> {
-                            val uuid = map["uuid"] ?: ""
-                            if (server.isNotBlank() && uuid.isNotBlank()) {
-                                val obj = JSONObject().apply {
-                                    put("v", "2")
-                                    put("ps", name)
-                                    put("add", server)
-                                    put("port", port)
-                                    put("id", uuid)
-                                    put("aid", map["alterId"] ?: "0")
-                                    put("scy", map["cipher"]?.takeIf { it != "null" && it.isNotBlank() } ?: "auto")
-                                    put("net", map["network"] ?: "tcp")
-                                    put("tls", if (map["tls"] == "true") "tls" else "")
-                                    put("sni", map["servername"] ?: map["sni"] ?: "")
-                                    put("host", map["host"] ?: "")
-                                    put("path", map["path"] ?: "")
-                                }
-                                val b64 = Base64.encodeToString(obj.toString().toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
-                                list.add("vmess://$b64")
-                            }
-                        }
-                        "vless" -> {
-                            val uuid = map["uuid"] ?: ""
-                            if (server.isNotBlank() && uuid.isNotBlank()) {
-                                val tls = if (map["tls"] == "true") "tls" else "none"
-                                val net = map["network"] ?: "tcp"
-                                val sni = map["servername"] ?: map["sni"] ?: ""
-                                val flow = map["flow"] ?: ""
-                                val isReality = map["reality-opts"] != null || map["reality"] == "true"
-                                val sec = if (isReality) "reality" else tls
-                                val uri = "vless://$uuid@$server:$port?security=$sec&type=$net&sni=$sni&flow=$flow#$encodedName"
-                                list.add(uri)
-                            }
-                        }
-                        "trojan" -> {
-                            val password = map["password"] ?: ""
-                            if (server.isNotBlank() && password.isNotBlank()) {
-                                val sni = map["sni"] ?: map["servername"] ?: ""
-                                val uri = "trojan://$password@$server:$port?sni=$sni#$encodedName"
-                                list.add(uri)
-                            }
-                        }
-                        "ss" -> {
-                            val cipher = map["cipher"]?.takeIf { it != "null" && it.isNotBlank() } ?: "aes-128-gcm"
-                            val password = map["password"] ?: ""
-                            if (server.isNotBlank() && password.isNotBlank()) {
-                                val userPart = Base64.encodeToString("$cipher:$password".toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
-                                list.add("ss://$userPart@$server:$port#$encodedName")
-                            }
-                        }
-                        "hysteria2", "hy2" -> {
-                            val auth = map["password"] ?: map["auth"] ?: ""
-                            val sni = map["sni"] ?: map["servername"] ?: ""
-                            val uri = "hy2://$auth@$server:$port?sni=$sni#$encodedName"
-                            list.add(uri)
-                        }
-                    }
-                } catch (_: Exception) {}
+                convertMapToUri(map)?.let { list.add(it) }
             }
             currentMap = null
         }
 
         for (rawLine in lines) {
             val line = rawLine.trim()
-            if (line.startsWith("- name:") || line.startsWith("- {name:")) {
+
+            // 1. 处理内联 JSON 样式的 Proxy
+            if (line.startsWith("- {") && line.endsWith("}")) {
+                flushCurrent()
+                val tempMap = HashMap<String, String>()
+                val content = line.removeSurrounding("- {", "}")
+                content.split(",").forEach { pair ->
+                    val kv = pair.split(":", limit = 2)
+                    if (kv.size == 2) {
+                        val k = kv[0].trim().replace("\"", "").replace("'", "")
+                        val v = kv[1].trim().replace("\"", "").replace("'", "")
+                        tempMap[k] = v
+                    }
+                }
+                convertMapToUri(tempMap)?.let { list.add(it) }
+                continue
+            }
+
+            // 2. 处理多行缩进 YAML 格式
+            if (line.startsWith("- name:") || line.startsWith("- type:")) {
                 flushCurrent()
                 currentMap = HashMap()
-                if (line.contains("{") && line.contains("}")) {
-                    val content = line.substringAfter("{").substringBeforeLast("}")
-                    content.split(",").forEach { pair ->
-                        val kv = pair.split(":", limit = 2)
-                        if (kv.size == 2) {
-                            val k = kv[0].trim().replace("\"", "").replace("'", "")
-                            val v = kv[1].trim().replace("\"", "").replace("'", "")
-                            currentMap?.put(k, v)
-                        }
-                    }
-                    flushCurrent()
-                } else {
-                    val n = line.substringAfter("- name:").trim().replace("\"", "").replace("'", "")
-                    currentMap?.put("name", n)
-                }
-            } else if (currentMap != null && line.contains(":")) {
-                val kv = line.split(":", limit = 2)
+                val kv = line.removePrefix("-").trim().split(":", limit = 2)
                 if (kv.size == 2) {
                     val k = kv[0].trim().replace("\"", "").replace("'", "")
                     val v = kv[1].trim().replace("\"", "").replace("'", "")
                     currentMap?.put(k, v)
+                }
+            } else if (currentMap != null && line.contains(":") && !line.startsWith("#")) {
+                val kv = line.split(":", limit = 2)
+                if (kv.size == 2) {
+                    val k = kv[0].trim().replace("\"", "").replace("'", "")
+                    val v = kv[1].trim().replace("\"", "").replace("'", "")
+                    if (v.isNotBlank()) {
+                        currentMap?.put(k, v)
+                    }
                 }
             }
         }
         flushCurrent()
         return list
     }
+
+    // ==================== 测速与导出逻辑 ====================
 
     private fun speedTest() {
         if (nodes.isEmpty()) {
@@ -816,6 +860,35 @@ class MainActivity : Activity() {
                             sb.append("    port: $port\n")
                             sb.append("    password: $auth\n")
                             if (sni.isNotBlank()) sb.append("    sni: $sni\n")
+                            proxyYamlList.add(sb.toString().trimEnd())
+                            proxyNames.add(name)
+                        }
+                    }
+                    node.startsWith("tuic://", ignoreCase = true) -> {
+                        val body = node.substring(7)
+                        val userPass = body.substringBefore("@")
+                        val uuid = userPass.substringBefore(":")
+                        val pass = userPass.substringAfter(":", "")
+                        val rest = body.substringAfter("@")
+                        val serverPort = rest.substringBefore("?").substringBefore("#")
+                        val server = serverPort.substringBefore(":")
+                        val port = serverPort.substringAfter(":", "8443").toIntOrNull() ?: 8443
+                        val queryStr = if (rest.contains("?")) rest.substringAfter("?").substringBefore("#") else ""
+                        val queryMap = parseQuery(queryStr)
+                        val rawRemark = if (rest.contains("#")) URLDecoder.decode(rest.substringAfter("#"), "UTF-8") else "TUIC"
+                        val name = cleanName(rawRemark, idx)
+                        val sni = queryMap["sni"] ?: ""
+
+                        if (server.isNotBlank() && uuid.isNotBlank()) {
+                            val sb = StringBuilder()
+                            sb.append("  - name: \"$name\"\n")
+                            sb.append("    type: tuic\n")
+                            sb.append("    server: $server\n")
+                            sb.append("    port: $port\n")
+                            sb.append("    uuid: $uuid\n")
+                            if (pass.isNotBlank()) sb.append("    password: $pass\n")
+                            if (sni.isNotBlank()) sb.append("    sni: $sni\n")
+                            sb.append("    reduce-rtt: true\n")
                             proxyYamlList.add(sb.toString().trimEnd())
                             proxyNames.add(name)
                         }
