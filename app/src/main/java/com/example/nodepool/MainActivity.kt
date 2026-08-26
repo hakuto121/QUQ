@@ -18,8 +18,10 @@ import java.net.URL
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.Collections
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLParameters
@@ -30,17 +32,24 @@ class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("node_pool", MODE_PRIVATE) }
     private val sources = LinkedHashSet<String>()
     
-    // 原始全量池与测速结果池
+    // 全量原始节点池与已验证存活节点池
     private val rawNodes = Collections.synchronizedList(ArrayList<String>())
     private val validNodes = Collections.synchronizedList(ArrayList<Pair<String, Long>>())
+
+    // 测速任务控制
+    private var testThreadPool: ExecutorService? = null
+    private val isTesting = AtomicBoolean(false)
+    private val isPaused = AtomicBoolean(false)
+    private val doneCount = AtomicInteger(0)
 
     private lateinit var sourceInput: EditText
     private lateinit var countInput: EditText
     private lateinit var timeoutInput: EditText
     private lateinit var status: TextView
     private lateinit var sourceContainer: LinearLayout
+    private lateinit var speedBtn: Button
+    private lateinit var pauseBtn: Button
 
-    // 扩充高质量海量抓取源
     private val defaultSources = listOf(
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs_base64.txt",
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
@@ -89,7 +98,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "征兵处 - 节点池中枢 (三大独立流程)"
+            text = "征兵处 - 节点池中枢"
             textSize = 20f
             setPadding(0, 0, 0, 16)
         })
@@ -122,13 +131,26 @@ class MainActivity : Activity() {
         root.addView(sourceContainer)
         refreshSourceList()
 
-        // 核心三大功能按钮
-        val step1Btn = Button(this).apply { text = "【步骤 1】全量抓取节点 (暴力全收)" }
-        val step2Btn = Button(this).apply { text = "【步骤 2】深度筛选可用节点 (协议探测)" }
-        val step3Btn = Button(this).apply { text = "【步骤 3】按延迟升序排序" }
-
+        val step1Btn = Button(this).apply { text = "【步骤 1】全量极速抓取 (全收不漏)" }
         root.addView(step1Btn)
-        root.addView(step2Btn)
+
+        val speedRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 4)
+        }
+        speedBtn = Button(this).apply {
+            text = "【步骤 2】并发精准测速"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f)
+        }
+        pauseBtn = Button(this).apply {
+            text = "暂停测速"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.8f)
+        }
+        speedRow.addView(speedBtn)
+        speedRow.addView(pauseBtn)
+        root.addView(speedRow)
+
+        val step3Btn = Button(this).apply { text = "【步骤 3】对已测节点按延迟升序排序" }
         root.addView(step3Btn)
 
         val configRow = LinearLayout(this).apply {
@@ -143,8 +165,8 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         countInput = EditText(this).apply {
-            hint = "导出上限"
-            setText("5000")
+            hint = "导出上限数"
+            setText("1000")
             inputType = 2
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -168,7 +190,7 @@ class MainActivity : Activity() {
         btnRow2.addView(exportClash)
         root.addView(btnRow2)
 
-        val clearBtn = Button(this).apply { text = "清空所有已抓取/筛选数据" }
+        val clearBtn = Button(this).apply { text = "清空所有抓取与测速缓存" }
         root.addView(clearBtn)
 
         status = TextView(this).apply {
@@ -198,11 +220,13 @@ class MainActivity : Activity() {
         }
 
         step1Btn.setOnClickListener { actionScrapeAll() }
-        step2Btn.setOnClickListener { actionFilterAlive() }
+        speedBtn.setOnClickListener { actionStartSpeedTest() }
+        pauseBtn.setOnClickListener { actionTogglePause() }
         step3Btn.setOnClickListener { actionSortNodes() }
         exportTxt.setOnClickListener { exportFile(false) }
         exportClash.setOnClickListener { exportFile(true) }
         clearBtn.setOnClickListener {
+            stopSpeedTestInternal()
             rawNodes.clear()
             validNodes.clear()
             updateStatusDisplay()
@@ -256,7 +280,8 @@ class MainActivity : Activity() {
             status.text = "请先添加订阅源"
             return
         }
-        status.text = "正在启动多线程全量暴力抓取..."
+        stopSpeedTestInternal()
+        status.text = "正在启动极速多线程抓取全部节点..."
 
         val pool = Executors.newFixedThreadPool(sources.size.coerceIn(8, 32))
         val collected = Collections.synchronizedList(ArrayList<String>())
@@ -275,7 +300,7 @@ class MainActivity : Activity() {
 
                 val c = completedCount.incrementAndGet()
                 runOnUiThread {
-                    status.text = "抓取进度: $c/$total 源完成，已提取 ${collected.size} 个原始节点..."
+                    status.text = "抓取进度: $c/$total 完成，已捕获 ${collected.size} 个原始节点..."
                 }
             }
         }
@@ -287,27 +312,45 @@ class MainActivity : Activity() {
             rawNodes.addAll(collected)
             runOnUiThread {
                 updateStatusDisplay()
-                status.append("\n全量抓取完毕！共获取 ${rawNodes.size} 个节点。请继续点击【步骤 2】进行可用性筛选。")
+                status.append("\n抓取完成！共收集 ${rawNodes.size} 个节点（未做删减）。可继续点击【步骤 2】并发测速。")
             }
         }
     }
 
-    // ==================== 步骤 2：深度可用性筛选 ====================
+    // ==================== 步骤 2：并发测速与暂停控制 ====================
 
-    private fun actionFilterAlive() {
+    private fun actionStartSpeedTest() {
         if (rawNodes.isEmpty()) {
-            status.text = "原始节点池为空，请先执行【步骤 1】全量抓取"
+            status.text = "节点池为空，请先执行【步骤 1】抓取节点"
             return
         }
+        if (isTesting.get()) {
+            if (isPaused.get()) {
+                isPaused.set(false)
+                pauseBtn.text = "暂停测速"
+                status.text = "已恢复测速..."
+            }
+            return
+        }
+
         val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 10000) ?: 2000
         val snapshot = rawNodes.toList()
         validNodes.clear()
+        doneCount.set(0)
+        isTesting.set(true)
+        isPaused.set(false)
+        pauseBtn.text = "暂停测速"
 
-        val cpuPool = Executors.newFixedThreadPool(80)
-        val done = AtomicInteger(0)
+        val cpuPool = Executors.newFixedThreadPool(64)
+        testThreadPool = cpuPool
 
         snapshot.forEach { node ->
             cpuPool.submit {
+                while (isPaused.get() && isTesting.get()) {
+                    try { Thread.sleep(200) } catch (_: Exception) {}
+                }
+                if (!isTesting.get()) return@submit
+
                 val target = parseNodeMeta(node)
                 if (target != null) {
                     val latency = testConnectionStrict(target, timeout)
@@ -315,10 +358,12 @@ class MainActivity : Activity() {
                         validNodes.add(node to latency)
                     }
                 }
-                val d = done.incrementAndGet()
-                if (d % 50 == 0 || d == snapshot.size) {
+                val d = doneCount.incrementAndGet()
+                if (d % 25 == 0 || d == snapshot.size) {
                     runOnUiThread {
-                        status.text = "筛选进度: $d/${snapshot.size}，验证可用存活: ${validNodes.size} 个"
+                        if (isTesting.get()) {
+                            status.text = "测速中: $d/${snapshot.size}，已验证可用: ${validNodes.size} 个"
+                        }
                     }
                 }
             }
@@ -327,18 +372,41 @@ class MainActivity : Activity() {
         cpuPool.shutdown()
         Executors.newSingleThreadExecutor().execute {
             try { cpuPool.awaitTermination(180, TimeUnit.SECONDS) } catch (_: Exception) {}
+            isTesting.set(false)
+            isPaused.set(false)
             runOnUiThread {
+                pauseBtn.text = "暂停测速"
                 updateStatusDisplay()
-                status.append("\n筛选完成！已保留 ${validNodes.size} 个真实有效节点。可点击【步骤 3】排序或直接导出。")
+                status.append("\n测速流程结束！共测出 ${validNodes.size} 个低延迟可用节点。")
             }
         }
+    }
+
+    private fun actionTogglePause() {
+        if (!isTesting.get()) return
+        if (isPaused.get()) {
+            isPaused.set(false)
+            pauseBtn.text = "暂停测速"
+            status.text = "测速已继续..."
+        } else {
+            isPaused.set(true)
+            pauseBtn.text = "恢复测速"
+            status.text = "测速已暂停！当前已保存 ${validNodes.size} 个有效节点，可直接排序或导出。"
+        }
+    }
+
+    private fun stopSpeedTestInternal() {
+        isTesting.set(false)
+        isPaused.set(false)
+        testThreadPool?.shutdownNow()
+        testThreadPool = null
     }
 
     // ==================== 步骤 3：延迟排序 ====================
 
     private fun actionSortNodes() {
         if (validNodes.isEmpty()) {
-            status.text = "可用节点池为空，请先执行【步骤 2】筛选"
+            status.text = "提示：暂无可排序的有效节点（请先进行测速或在测速暂停后操作）"
             return
         }
         synchronized(validNodes) {
@@ -348,7 +416,7 @@ class MainActivity : Activity() {
         status.append("\n排序完成！已按延迟升序重排，最低延迟: ${validNodes.firstOrNull()?.second ?: 0}ms")
     }
 
-    // ==================== 严格网络连通探测 ====================
+    // ==================== 严格连接探测 ====================
 
     private data class NodeMeta(val host: String, val port: Int, val isTls: Boolean, val sni: String)
 
@@ -356,7 +424,6 @@ class MainActivity : Activity() {
         val start = System.currentTimeMillis()
         return try {
             if (meta.isTls) {
-                // 对 TLS/Reality/Trojan 发送真正的 Client Hello 握手探测
                 val socketFactory = SSLSocketFactory.getDefault()
                 val sslSocket = socketFactory.createSocket() as SSLSocket
                 sslSocket.soTimeout = timeout
@@ -366,7 +433,6 @@ class MainActivity : Activity() {
                     sslSocket.sslParameters = sslParams
                 }
                 sslSocket.connect(InetSocketAddress(meta.host, meta.port), timeout)
-                // 开启握手，直接验证是否被 GFW RST
                 sslSocket.startHandshake()
                 val latency = System.currentTimeMillis() - start
                 sslSocket.close()
@@ -388,7 +454,7 @@ class MainActivity : Activity() {
         return try {
             val u = node.trim()
             when {
-                u.startsWith("vmess://", ignoreCase = true) -> {
+                u.startsWith("vmess://", true) -> {
                     val b = u.substring(8)
                     val padLen = (4 - b.length % 4) % 4
                     val decoded = Base64.decode(b + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP).toString(StandardCharsets.UTF_8)
@@ -399,7 +465,7 @@ class MainActivity : Activity() {
                     val sni = obj.optString("sni", host)
                     NodeMeta(host, port, tls, sni)
                 }
-                u.startsWith("vless://", ignoreCase = true) || u.startsWith("trojan://", ignoreCase = true) -> {
+                u.startsWith("vless://", true) || u.startsWith("trojan://", true) -> {
                     val raw = u.substringAfter("://").substringBefore("#")
                     val serverPart = raw.substringBefore("?")
                     val hp = if (serverPart.contains("@")) serverPart.substringAfter("@") else serverPart
@@ -410,7 +476,7 @@ class MainActivity : Activity() {
                     val sni = query["sni"] ?: query["peer"] ?: host
                     NodeMeta(host, port, isTls, sni)
                 }
-                u.startsWith("ss://", ignoreCase = true) -> {
+                u.startsWith("ss://", true) -> {
                     val body = u.substring(5).substringBefore("#")
                     val serverPart = if (body.contains("@")) body.substringAfter("@") else body
                     val cleanHostPort = if (serverPart.contains(":")) serverPart else {
@@ -433,7 +499,7 @@ class MainActivity : Activity() {
         } catch (_: Exception) { null }
     }
 
-    // ==================== 暴力下载与抓取核心 ====================
+    // ==================== 极速下载与全量正则提取 ====================
 
     private fun downloadWithTimeout(urlStr: String): String {
         var result = ""
@@ -474,9 +540,8 @@ class MainActivity : Activity() {
     private fun extractNodesFull(rawText: String): List<String> {
         val candidates = ArrayList<String>()
         val prefixes = listOf("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "hysteria2://", "tuic://")
-
-        // 正则强行提取 URI（防止各种破损混排）
         val uriRegex = Regex("(?:vmess|vless|trojan|ss|ssr|hy2|hysteria2|tuic)://[^\\s\"'<>]+", RegexOption.IGNORE_CASE)
+
         uriRegex.findAll(rawText).forEach { match ->
             candidates.add(match.value.trim().trimEnd(',', ';', ']', ')', '}', '\r', '\n'))
         }
@@ -637,25 +702,33 @@ class MainActivity : Activity() {
         return list
     }
 
-    // ==================== 导出文件 ====================
+    // ==================== 智能导出 ====================
 
     private fun exportFile(clash: Boolean) {
-        val targetList = if (validNodes.isNotEmpty()) validNodes.map { it.first } else rawNodes
+        val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 1000
+        val targetList: List<String> = if (validNodes.isNotEmpty()) {
+            // 已测速/已暂停：取前 N 个有效节点
+            validNodes.map { it.first }.take(n)
+        } else {
+            // 未测速：随机乱序后取前 N 个
+            val shuffled = rawNodes.toMutableList()
+            shuffled.shuffle()
+            shuffled.take(n)
+        }
+
         if (targetList.isEmpty()) {
-            status.text = "提示：当前没有任何节点可导出"
+            status.text = "提示：当前无可用节点导出，请先执行步骤 1"
             return
         }
-        val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 5000
-        val selected = targetList.take(n)
 
         val body = if (!clash) {
-            selected.joinToString("\n") + "\n"
+            targetList.joinToString("\n") + "\n"
         } else {
-            generateClashConfig(selected)
+            generateClashConfig(targetList)
         }
 
         val ext = if (clash) "yaml" else "txt"
-        val name = "nodepool_export_${selected.size}.$ext"
+        val name = "nodepool_export_${targetList.size}.$ext"
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             type = if (clash) "text/yaml" else "text/plain"
             putExtra(Intent.EXTRA_TITLE, name)
@@ -673,7 +746,7 @@ class MainActivity : Activity() {
             val node = rawNode.trim()
             try {
                 when {
-                    node.startsWith("vmess://", ignoreCase = true) -> {
+                    node.startsWith("vmess://", true) -> {
                         val b = node.substring(8)
                         val padLen = (4 - b.length % 4) % 4
                         val json = String(Base64.decode(b + "=".repeat(padLen), Base64.DEFAULT or Base64.NO_WRAP), StandardCharsets.UTF_8)
@@ -684,7 +757,7 @@ class MainActivity : Activity() {
                         val uuid = obj.optString("id")
                         val alterId = obj.optInt("aid", 0)
                         var cipher = obj.optString("scy", "auto").ifBlank { "auto" }
-                        if (cipher.equals("null", ignoreCase = true)) cipher = "auto"
+                        if (cipher.equals("null", true)) cipher = "auto"
                         val net = obj.optString("net", "tcp")
                         val tls = obj.optString("tls") == "tls"
                         val sni = obj.optString("sni", "")
@@ -718,25 +791,24 @@ class MainActivity : Activity() {
                             proxyNames.add(name)
                         }
                     }
-                    node.startsWith("vless://", ignoreCase = true) -> {
+                    node.startsWith("vless://", true) -> {
                         val body = node.substring(8)
                         val uuid = body.substringBefore("@")
                         val rest = body.substringAfter("@")
                         val serverPort = rest.substringBefore("?").substringBefore("#")
                         val server = serverPort.substringBefore(":")
                         val port = serverPort.substringAfter(":", "443").toIntOrNull() ?: 443
-                        val queryStr = if (rest.contains("?")) rest.substringAfter("?").substringBefore("#") else ""
-                        val queryMap = parseQuery(queryStr)
+                        val query = parseQuery(if (rest.contains("?")) rest.substringAfter("?").substringBefore("#") else "")
                         val rawRemark = if (rest.contains("#")) URLDecoder.decode(rest.substringAfter("#"), "UTF-8") else "VLESS"
                         val name = cleanName(rawRemark, idx)
 
-                        val sec = queryMap["security"] ?: ""
-                        val flow = queryMap["flow"] ?: ""
-                        val sni = queryMap["sni"] ?: ""
-                        val net = queryMap["type"] ?: "tcp"
-                        val pbk = queryMap["pbk"] ?: ""
-                        val sid = queryMap["sid"] ?: ""
-                        val fp = queryMap["fp"] ?: "chrome"
+                        val sec = query["security"] ?: ""
+                        val flow = query["flow"] ?: ""
+                        val sni = query["sni"] ?: ""
+                        val net = query["type"] ?: "tcp"
+                        val pbk = query["pbk"] ?: ""
+                        val sid = query["sid"] ?: ""
+                        val fp = query["fp"] ?: "chrome"
 
                         if (server.isNotBlank() && uuid.isNotBlank()) {
                             val sb = StringBuilder()
@@ -763,28 +835,27 @@ class MainActivity : Activity() {
                             if (net == "ws") {
                                 sb.append("    network: ws\n")
                                 sb.append("    ws-opts:\n")
-                                queryMap["path"]?.let { sb.append("      path: \"$it\"\n") }
-                                queryMap["host"]?.let { sb.append("      headers:\n        Host: $it\n") }
+                                query["path"]?.let { sb.append("      path: \"$it\"\n") }
+                                query["host"]?.let { sb.append("      headers:\n        Host: $it\n") }
                             } else if (net == "grpc") {
                                 sb.append("    network: grpc\n")
-                                sb.append("    grpc-opts:\n      grpc-service-name: \"${queryMap["serviceName"] ?: queryMap["path"] ?: ""}\"\n")
+                                sb.append("    grpc-opts:\n      grpc-service-name: \"${query["serviceName"] ?: query["path"] ?: ""}\"\n")
                             }
                             proxyYamlList.add(sb.toString().trimEnd())
                             proxyNames.add(name)
                         }
                     }
-                    node.startsWith("trojan://", ignoreCase = true) -> {
+                    node.startsWith("trojan://", true) -> {
                         val body = node.substring(9)
                         val password = body.substringBefore("@")
                         val rest = body.substringAfter("@")
                         val serverPort = rest.substringBefore("?").substringBefore("#")
                         val server = serverPort.substringBefore(":")
                         val port = serverPort.substringAfter(":", "443").toIntOrNull() ?: 443
-                        val queryStr = if (rest.contains("?")) rest.substringAfter("?").substringBefore("#") else ""
-                        val queryMap = parseQuery(queryStr)
+                        val query = parseQuery(if (rest.contains("?")) rest.substringAfter("?").substringBefore("#") else "")
                         val rawRemark = if (rest.contains("#")) URLDecoder.decode(rest.substringAfter("#"), "UTF-8") else "Trojan"
                         val name = cleanName(rawRemark, idx)
-                        val sni = queryMap["sni"] ?: queryMap["peer"] ?: ""
+                        val sni = query["sni"] ?: query["peer"] ?: ""
 
                         if (server.isNotBlank() && password.isNotBlank()) {
                             val sb = StringBuilder()
@@ -799,7 +870,7 @@ class MainActivity : Activity() {
                             proxyNames.add(name)
                         }
                     }
-                    node.startsWith("ss://", ignoreCase = true) -> {
+                    node.startsWith("ss://", true) -> {
                         val body = node.substring(5)
                         val rawRemark = if (body.contains("#")) URLDecoder.decode(body.substringAfter("#"), "UTF-8") else "SS"
                         val name = cleanName(rawRemark, idx)
@@ -913,5 +984,10 @@ class MainActivity : Activity() {
                 status.text = "导出失败：${e.message}"
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopSpeedTestInternal()
     }
 }
