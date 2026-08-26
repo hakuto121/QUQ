@@ -22,7 +22,7 @@ class MainActivity : Activity() {
     private val scored = ArrayList<Pair<String, Long>>()
     
     private lateinit var sourceInput: EditText
-    private lateinit var customDomainInput: EditText // 用户专属 edgetunnel 域名输入框
+    private lateinit var customDomainInput: EditText
     private lateinit var countInput: EditText
     private lateinit var timeoutInput: EditText
     private lateinit var status: TextView
@@ -61,11 +61,7 @@ class MainActivity : Activity() {
         val key = if (isEdgeMode) "sources_edge" else "sources_general"
         val saved = prefs.getStringSet(key, null)
         sources.clear()
-        if (saved.isNullOrEmpty()) {
-            if (!isEdgeMode) {
-                sources.addAll(defaultsGeneral)
-            }
-        } else {
+        if (!saved.isNullOrEmpty()) {
             sources.addAll(saved)
         }
     }
@@ -113,24 +109,23 @@ class MainActivity : Activity() {
         modeRadioGroup.addView(rbGeneral)
         root.addView(modeRadioGroup)
 
-        // edgetunnel 专用域名配置面板
         edgeConfigLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, 12)
         }
         edgeConfigLayout.addView(TextView(this).apply {
-            text = "输入你的 edgetunnel 订阅链接或完整域名："
+            text = "输入你自己的 edgetunnel 订阅链接："
             textSize = 13f
         })
         customDomainInput = EditText(this).apply {
-            hint = "例如: https://yourname.pages.dev/sub?token=xxx"
+            hint = "例如: https://xxx.pages.dev/sub?token=xxx"
             setText(prefs.getString("custom_edge_url", ""))
             minLines = 1
         }
         edgeConfigLayout.addView(customDomainInput)
         
         val saveDomainBtn = Button(this).apply {
-            text = "保存我的 edgetunnel 域名"
+            text = "保存并绑定我的域名"
             textSize = 12f
         }
         saveDomainBtn.setOnClickListener {
@@ -140,9 +135,9 @@ class MainActivity : Activity() {
                 sources.add(domainUrl)
                 saveSources()
                 refreshSourceList()
-                status.text = "已绑定并保存你的专属 edgetunnel 域名！"
+                status.text = "已绑定并保存你的专属域名！"
             } else {
-                status.text = "请输入有效的 edgetunnel 链接"
+                status.text = "请输入有效的订阅链接"
             }
         }
         edgeConfigLayout.addView(saveDomainBtn)
@@ -304,7 +299,6 @@ class MainActivity : Activity() {
     }
 
     private fun updateAll() {
-        // 如果是 edgetunnel 模式，确保输入框里的自定义域名也加入源列表
         if (rbEdgeTunnel.isChecked) {
             val customUrl = customDomainInput.text.toString().trim()
             if (customUrl.startsWith("http://") || customUrl.startsWith("https://")) {
@@ -318,7 +312,7 @@ class MainActivity : Activity() {
             return
         }
         val isEdge = rbEdgeTunnel.isChecked
-        status.text = if (isEdge) "正在拉取你自己的 edgetunnel 订阅并应用优选……" else "正在并发下载全网订阅源……"
+        status.text = if (isEdge) "正在拉取你的 edgetunnel 订阅并应用优选……" else "正在并发下载全网订阅源……"
         
         executor.execute {
             val result = LinkedHashSet<String>()
@@ -711,7 +705,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun cleanName(raw: String?, index: Int): string {
+    private fun cleanName(raw: String?, index: Int): String {
         val s = (raw ?: "").replace(Regex("[\\r\\n\\t\"]"), " ")
             .replace(Regex("[\\x00-\\x1F\\x7F]"), "")
             .replace(Regex("[:'#\\[\\]{}|>]"), " ")
