@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
 import android.view.Gravity
+import android.view.View
 import android.widget.*
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -14,6 +15,7 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -131,7 +133,7 @@ class MainActivity : Activity() {
         }
         countInput = EditText(this).apply {
             hint = "导出上限数"
-            setText("300")
+            setText("3000") // 默认改大一点，方便全量导出
             inputType = 2
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -247,7 +249,7 @@ class MainActivity : Activity() {
             status.text = "请先添加订阅源"
             return
         }
-        status.text = "正在启动多线程抓取节点..."
+        status.text = "正在启动多线程全量暴力抓取节点..."
 
         val pool = Executors.newFixedThreadPool(sources.size.coerceIn(4, 32))
         val collectedNodes = Collections.synchronizedList(ArrayList<String>())
@@ -266,7 +268,7 @@ class MainActivity : Activity() {
 
                 val current = completedCount.incrementAndGet()
                 runOnUiThread {
-                    status.text = "抓取进度: $current/$total 源完成，累计捕获 ${collectedNodes.size} 个原始节点"
+                    status.text = "抓取进度: $current/$total 源完成，累计捕获 ${collectedNodes.size} 个节点"
                 }
             }
         }
@@ -278,37 +280,15 @@ class MainActivity : Activity() {
                 pool.awaitTermination(120, TimeUnit.SECONDS)
             } catch (_: Exception) {}
 
-            val distinctList = deduplicateNodes(collectedNodes)
+            // 绝对不去重！原样导入全部抓取到的节点
             nodes.clear()
-            nodes.addAll(distinctList)
+            nodes.addAll(collectedNodes)
             scored.clear()
 
             runOnUiThread {
-                status.text = "全量抓取完成！去重后保留 ${nodes.size} 个有效节点，建议点击测速"
+                status.text = "全量抓取完成！不去重共保留 ${nodes.size} 个节点，建议点击测速"
             }
         }
-    }
-
-    private fun deduplicateNodes(rawList: List<String>): List<String> {
-        val seenServerPort = HashSet<String>()
-        val result = ArrayList<String>()
-
-        for (node in rawList) {
-            val trimmed = node.trim()
-            if (trimmed.isBlank()) continue
-            val hp = parseHostPort(trimmed)
-            if (hp != null) {
-                val key = "${hp.first.lowercase()}:${hp.second}"
-                if (seenServerPort.add(key)) {
-                    result.add(trimmed)
-                }
-            } else {
-                if (!result.contains(trimmed)) {
-                    result.add(trimmed)
-                }
-            }
-        }
-        return result
     }
 
     private fun downloadWithTimeout(urlStr: String): String {
@@ -321,7 +301,7 @@ class MainActivity : Activity() {
                 conn = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
                     connectTimeout = 8000
-                    readTimeout = 12000
+                    readTimeout = 15000
                     instanceFollowRedirects = true
                     setRequestProperty("User-Agent", "ClashMeta/v1.18.0 (Android; arm64-v8a)")
                     setRequestProperty("Accept", "*/*")
@@ -352,18 +332,34 @@ class MainActivity : Activity() {
     // ==================== 全协议 / 多格式万能提取核心 ====================
 
     private fun extractNodesFull(rawText: String): List<String> {
-        val candidates = LinkedHashSet<String>()
+        val candidates = ArrayList<String>() // 绝对不使用 Set，保证全量
         val prefixes = listOf("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "hysteria2://", "hysteria://", "tuic://")
 
+        fun scanText(text: String) {
+            text.lines().forEach { line ->
+                val l = line.trim().trimEnd(',', ';', ']', ')', '}', '\r', '\n')
+                if (prefixes.any { l.startsWith(it, ignoreCase = true) }) {
+                    candidates.add(l)
+                }
+            }
+        }
+
         fun tryBase64Decode(s: String): String? {
-            val clean = s.trim().replace("\\s+".toRegex(), "").replace("-", "+").replace("_", "/")
-            if (clean.length < 8) return null
+            // 极致暴力清洗：丢弃所有不属于 Base64 字符的内容，防止单个特殊字符毁掉整块几十兆的节点文本
+            val clean = s.replace(Regex("[^A-Za-z0-9+/=\\-_]"), "")
+            if (clean.length < 16) return null
+            
+            // 补齐 Base64 结尾等号
             val padLen = (4 - clean.length % 4) % 4
             val padded = clean + "=".repeat(padLen)
+            
             return try {
+                // 兼容带横杠下划线的 URL_SAFE 格式以及标准格式
                 val data = Base64.decode(padded, Base64.DEFAULT or Base64.NO_WRAP or Base64.URL_SAFE)
                 val decoded = String(data, StandardCharsets.UTF_8)
-                if (decoded.any { it.isLetterOrDigit() || it in ":/?#=&" }) decoded else null
+                
+                // 判断解出来的明文里有没有常规的协议头
+                if (prefixes.any { decoded.contains(it, ignoreCase = true) }) decoded else null
             } catch (_: Exception) { null }
         }
 
@@ -383,7 +379,7 @@ class MainActivity : Activity() {
                 }
             }
 
-            // 2. 整块文本 Base64 解码扫描
+            // 2. 尝试将整块文本作为超大 Base64 强行解码
             tryBase64Decode(text)?.let { decodedFull ->
                 parseRecursive(decodedFull, depth + 1)
             }
@@ -395,7 +391,7 @@ class MainActivity : Activity() {
         }
 
         parseRecursive(rawText)
-        return candidates.toList()
+        return candidates
     }
 
     private fun parseClashYamlToNodes(yamlText: String): List<String> {
@@ -555,7 +551,7 @@ class MainActivity : Activity() {
         val snapshot = nodes.toList()
         status.text = "并发连通性测速中：0/${snapshot.size}"
 
-        val cpuPool = Executors.newFixedThreadPool(48)
+        val cpuPool = Executors.newFixedThreadPool(64) // 开大并发
         val results = Collections.synchronizedList(ArrayList<Pair<String, Long>>())
         val done = AtomicInteger(0)
 
@@ -575,7 +571,7 @@ class MainActivity : Activity() {
                     } catch (_: Exception) {}
                 }
                 val d = done.incrementAndGet()
-                if (d % 30 == 0 || d == snapshot.size) {
+                if (d % 100 == 0 || d == snapshot.size) {
                     runOnUiThread {
                         status.text = "测速中: $d/${snapshot.size}，可用存活: ${results.size}"
                     }
@@ -586,12 +582,14 @@ class MainActivity : Activity() {
 
         Executors.newSingleThreadExecutor().execute {
             try {
-                cpuPool.awaitTermination(90, TimeUnit.SECONDS)
+                cpuPool.awaitTermination(120, TimeUnit.SECONDS)
             } catch (_: Exception) {}
 
             results.sortBy { it.second }
             scored.clear()
             scored.addAll(results)
+            
+            // 即使全量测速完，在导出前也将可用节点替换到 nodes 池子里
             nodes.clear()
             nodes.addAll(results.map { it.first })
 
@@ -642,7 +640,7 @@ class MainActivity : Activity() {
             status.text = "提示：没有可导出的节点"
             return
         }
-        val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 300
+        val n = countInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 3000
         val selected = nodes.take(n)
 
         val body = if (!clash) {
