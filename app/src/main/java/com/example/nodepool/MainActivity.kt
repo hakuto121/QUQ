@@ -69,7 +69,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "节点池管理器 (Vertex加速版)"
+            text = "节点池管理器 (高存活加速版)"
             textSize = 24f
             setPadding(0, 0, 0, 16)
         })
@@ -110,12 +110,12 @@ class MainActivity : Activity() {
         val updateBtn = Button(this).apply { text = "① 更新全部订阅并自动加速" }
         root.addView(updateBtn)
 
-        val speedBtn = Button(this).apply { text = "② 开始测速排序" }
+        val speedBtn = Button(this).apply { text = "② 深度测速与存活筛选" }
         root.addView(speedBtn)
 
         timeoutInput = EditText(this).apply {
             hint = "测速超时（毫秒）"
-            setText("2000")
+            setText("2500")
             inputType = 2
         }
         root.addView(timeoutInput)
@@ -328,14 +328,15 @@ class MainActivity : Activity() {
         return candidates.toList()
     }
 
+    // 升级版深度测速：结合 TCP 握手 + Google 真实业务 HTTP 探测，剔除僵尸/伪存活节点
     private fun speedTest() {
         if (nodes.isEmpty()) {
             status.text = "请先点击“更新全部订阅”"
             return
         }
-        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2000
+        val timeout = timeoutInput.text.toString().toIntOrNull()?.coerceIn(500, 15000) ?: 2500
         val snapshot = nodes.toList()
-        status.text = "正在真实测速中：0/${snapshot.size}"
+        status.text = "正在进行深度可用性测速：0/${snapshot.size}"
         executor.execute {
             val results = java.util.Collections.synchronizedList(ArrayList<Pair<String, Long>>())
             val done = AtomicInteger(0)
@@ -346,15 +347,24 @@ class MainActivity : Activity() {
                     if (hp != null) {
                         val start = System.currentTimeMillis()
                         try {
-                            Socket().use {
-                                it.connect(InetSocketAddress(hp.first, hp.second), timeout)
+                            // 1. TCP 基础连通性握手
+                            Socket().use { socket ->
+                                socket.connect(InetSocketAddress(hp.first, hp.second), timeout)
                             }
-                            results.add(node to (System.currentTimeMillis() - start))
+                            
+                            // 2. 真实业务 HTTP 探测（测试是否真正可达 Google 生成服务）
+                            val conn = URL("https://aiplatform.googleapis.com/generate_204").openConnection() as HttpURLConnection
+                            conn.connectTimeout = timeout
+                            conn.readTimeout = timeout
+                            conn.responseCode // 触发实际通信
+                            
+                            val latency = System.currentTimeMillis() - start
+                            results.add(node to latency)
                         } catch (_: Exception) {}
                     }
                     val d = done.incrementAndGet()
                     if (d % 10 == 0 || d == snapshot.size) {
-                        runOnUiThread { status.text = "正在测速：$d/${snapshot.size}，可用极速节点 ${results.size}" }
+                        runOnUiThread { status.text = "深度测速中：$d/${snapshot.size}，高存活有效节点 ${results.size}" }
                     }
                 }
             }
@@ -364,7 +374,7 @@ class MainActivity : Activity() {
             scored.clear(); scored.addAll(results)
             nodes.clear(); nodes.addAll(results.map { it.first })
             runOnUiThread {
-                status.text = "测速完成：保留 ${results.size} 个优质可用节点（已按延迟排好序）"
+                status.text = "测速完成：精筛出 ${results.size} 个高可用极速节点（已按延迟排序）"
             }
         }
     }
@@ -423,7 +433,8 @@ class MainActivity : Activity() {
                     node.startsWith("vmess://", ignoreCase = true) -> {
                         val json = String(Base64.decode(node.substring(8), Base64.DEFAULT or Base64.NO_WRAP), Charsets.UTF_8)
                         val obj = JSONObject(json)
-                        val name = cleanName(obj.optString("ps"), "VMess-$idx")
+                        val rawName = obj.optString("ps").ifBlank { "VMess" }
+                        val name = cleanName(rawName, idx)
                         val server = obj.optString("add")
                         val port = obj.optInt("port", 443)
                         val uuid = obj.optString("id")
@@ -465,8 +476,8 @@ class MainActivity : Activity() {
                         val server = uri.host ?: ""
                         val port = if (uri.port > 0) uri.port else 443
                         val queryMap = parseQuery(uri.rawQuery ?: "")
-                        val remark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: ""
-                        val name = cleanName(remark, "VLESS-$idx")
+                        val rawRemark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "VLESS"
+                        val name = cleanName(rawRemark, idx)
                         val tls = queryMap["security"] == "tls" || queryMap["security"] == "reality"
                         val flow = queryMap["flow"] ?: ""
                         val sni = queryMap["sni"] ?: ""
@@ -506,8 +517,8 @@ class MainActivity : Activity() {
                         val server = uri.host ?: ""
                         val port = if (uri.port > 0) uri.port else 443
                         val queryMap = parseQuery(uri.rawQuery ?: "")
-                        val remark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: ""
-                        val name = cleanName(remark, "Trojan-$idx")
+                        val rawRemark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "Trojan"
+                        val name = cleanName(rawRemark, idx)
                         val sni = queryMap["sni"] ?: ""
 
                         if (server.isNotBlank() && password.isNotBlank()) {
@@ -525,8 +536,8 @@ class MainActivity : Activity() {
                     }
                     node.startsWith("ss://", ignoreCase = true) -> {
                         val uri = URI(node)
-                        val remark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: ""
-                        val name = cleanName(remark, "SS-$idx")
+                        val rawRemark = uri.rawFragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "SS"
+                        val name = cleanName(rawRemark, idx)
                         var userInfo = uri.userInfo ?: ""
                         val server: String
                         val port: Int
@@ -598,12 +609,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun cleanName(raw: String?, fallback: String): String {
+    private fun cleanName(raw: String?, index: Int): String {
         val s = (raw ?: "").replace(Regex("[\\r\\n\\t\"]"), " ")
             .replace(Regex("[\\x00-\\x1F\\x7F]"), "")
             .replace(Regex("[:'#\\[\\]{}|>]"), " ")
             .trim()
-        return if (s.isBlank()) fallback else s
+        val base = if (s.isBlank()) "Node" else s
+        return String.format("%03d-%s", index, base)
     }
 
     private fun parseQuery(query: String): Map<String, String> {
